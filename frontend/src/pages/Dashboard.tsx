@@ -12,7 +12,7 @@ import { logout } from "../services/auth";
 import { useAuth } from "../context/AuthContext";
 import { listenToChats, listenToMessages } from "../services/chats";
 import { sendWhatsAppMessage } from "../services/whatsapp";
-
+import QuickReplies from "../components/QuickReplies";
 import type { Chat, ChatMessage } from "../types";
 
 function formatTime(value: any) {
