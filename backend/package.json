@@ -1,0 +1,16 @@
+{
+  "name": "joy-inbox-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "zip": "zip -r joy-inbox-backend.zip index.js package.json node_modules"
+  },
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.5.0"
+  }
+}
