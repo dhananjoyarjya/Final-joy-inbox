@@ -2,11 +2,9 @@
   "name": "joy-inbox-backend",
   "version": "1.0.0",
   "private": true,
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js",
-    "zip": "zip -r joy-inbox-backend.zip index.js package.json node_modules"
-  },
+  "description": "Joy Inbox WhatsApp Cloud API backend",
+  "main": "src/index.js",
+  "type": "commonjs",
   "engines": {
     "node": "22.x"
   },
