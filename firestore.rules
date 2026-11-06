@@ -1,0 +1,59 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner() {
+      return request.auth != null
+        && request.auth.uid == "Vy49nGnw74gR5SFHmjN0DOQ2QFE3";
+    }
+
+    // Owner can read Joy Inbox data.
+    // Frontend cannot directly write chats or messages.
+    match /{document=**} {
+      allow read: if isOwner();
+      allow write: if false;
+    }
+
+    // Owner can manage their own saved Quick Replies.
+    match /users/{userId}/quickReplies/{replyId} {
+      allow read: if isOwner()
+        && request.auth.uid == userId;
+
+      allow create: if isOwner()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly([
+          "title",
+          "shortcut",
+          "message",
+          "createdAt",
+          "updatedAt"
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.message is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.message.size() > 0
+        && request.resource.data.title.size() <= 60
+        && request.resource.data.message.size() <= 4096;
+
+      allow update: if isOwner()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly([
+          "title",
+          "shortcut",
+          "message",
+          "createdAt",
+          "updatedAt"
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.message is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.message.size() > 0
+        && request.resource.data.title.size() <= 60
+        && request.resource.data.message.size() <= 4096;
+
+      allow delete: if isOwner()
+        && request.auth.uid == userId;
+    }
+  }
+}
