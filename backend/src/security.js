@@ -1,3 +1,4 @@
+
 const crypto = require("crypto");
 
 function getHeader(event, headerName) {
@@ -34,22 +35,17 @@ function verifyMetaSignature(event) {
     throw new Error("Meta App Secret is not configured.");
   }
 
-  const signature = getHeader(
-    event,
-    "x-hub-signature-256"
-  );
+  const signature = getHeader(event, "x-hub-signature-256");
 
   if (!signature || !signature.startsWith("sha256=")) {
     return false;
   }
 
-  const rawBody = getRawBody(event);
-
   const expected =
     "sha256=" +
     crypto
       .createHmac("sha256", appSecret)
-      .update(rawBody)
+      .update(getRawBody(event))
       .digest("hex");
 
   const receivedBuffer = Buffer.from(signature);
@@ -59,16 +55,11 @@ function verifyMetaSignature(event) {
     return false;
   }
 
-  return crypto.timingSafeEqual(
-    receivedBuffer,
-    expectedBuffer
-  );
+  return crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
 function getCorsOrigin(event) {
-  const allowedOrigins = (
-    process.env.CORS_ORIGINS || ""
-  )
+  const allowedOrigins = (process.env.CORS_ORIGINS || "")
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
@@ -79,53 +70,53 @@ function getCorsOrigin(event) {
     return "";
   }
 
-  if (allowedOrigins.includes(requestOrigin)) {
-    return requestOrigin;
-  }
-
-  return "";
+  return allowedOrigins.includes(requestOrigin) ? requestOrigin : "";
 }
 
-function jsonResponse(event, statusCode, body) {
-  const origin = getCorsOrigin(event);
-
+function getCorsHeaders(event) {
   const headers = {
-    "Content-Type": "application/json",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Content-Type,Authorization"
+    "Access-Control-Allow-Headers": "Content-Type,Authorization"
   };
+
+  const origin = getCorsOrigin(event);
 
   if (origin) {
     headers["Access-Control-Allow-Origin"] = origin;
     headers["Vary"] = "Origin";
   }
 
+  return headers;
+}
+
+function jsonResponse(event, statusCode, body) {
   return {
     statusCode,
-    headers,
+    headers: {
+      ...getCorsHeaders(event),
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(body)
   };
 }
 
 function textResponse(event, statusCode, body) {
-  const origin = getCorsOrigin(event);
-
-  const headers = {
-    "Content-Type": "text/plain",
-    "Cache-Control": "no-store"
-  };
-
-  if (origin) {
-    headers["Access-Control-Allow-Origin"] = origin;
-    headers["Vary"] = "Origin";
-  }
-
   return {
     statusCode,
-    headers,
+    headers: {
+      ...getCorsHeaders(event),
+      "Content-Type": "text/plain"
+    },
     body: String(body)
+  };
+}
+
+function emptyResponse(event, statusCode = 204) {
+  return {
+    statusCode,
+    headers: getCorsHeaders(event),
+    body: ""
   };
 }
 
@@ -134,5 +125,6 @@ module.exports = {
   getRawBody,
   verifyMetaSignature,
   jsonResponse,
-  textResponse
+  textResponse,
+  emptyResponse
 };
