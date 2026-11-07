@@ -1,8 +1,10 @@
+
 const { getFirebaseAdmin, getDb } = require("./firebase");
 const {
   getHeader,
   jsonResponse,
-  textResponse
+  textResponse,
+  emptyResponse
 } = require("./security");
 const {
   verifyWebhook,
@@ -78,22 +80,22 @@ async function sendMessage(event) {
   const body = parseBody(event);
 
   const to = normalizePhoneNumber(body.to);
-  const text = String(body.text || "").trim();
+  const messageText = String(body.text || "").trim();
   const chatId = normalizePhoneNumber(body.chatId || to);
 
-  if (!to || !text || !chatId || to !== chatId) {
+  if (!to || !messageText || !chatId || to !== chatId) {
     return jsonResponse(event, 400, {
       error: "Valid to, chatId and text are required."
     });
   }
 
-  if (text.length > 4096) {
+  if (messageText.length > 4096) {
     return jsonResponse(event, 400, {
       error: "Message is too long."
     });
   }
 
-  const result = await sendWhatsAppText(to, text);
+  const result = await sendWhatsAppText(to, messageText);
   const db = getDb();
 
   const chatRef = db.collection("chats").doc(chatId);
@@ -109,7 +111,7 @@ async function sendMessage(event) {
       chatId,
       direction: "outgoing",
       type: "text",
-      text,
+      text: messageText,
       timestamp,
       status: "sent",
       source: body.source === "quick_reply"
@@ -122,7 +124,7 @@ async function sendMessage(event) {
       chatRef,
       {
         customerPhone: chatId,
-        lastMessage: text,
+        lastMessage: messageText,
         lastMessageAt: timestamp,
         lastMessageDirection: "outgoing",
         updatedAt: timestamp
@@ -142,7 +144,7 @@ exports.handler = async (event) => {
   const path = getPath(event);
 
   if (method === "OPTIONS") {
-    return jsonResponse(event, 204, {});
+    return emptyResponse(event, 204);
   }
 
   if (method === "GET" && path.endsWith("/webhook")) {
