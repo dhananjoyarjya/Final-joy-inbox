@@ -1,3 +1,4 @@
+
 import {
   collection,
   addDoc,
@@ -26,6 +27,34 @@ function getQuickReplyCollection(userId: string) {
   }
 
   return collection(db, "users", userId, "quickReplies");
+}
+
+function getQuickReplyDocument(userId: string, replyId: string) {
+  if (!replyId.trim()) {
+    throw new Error("Quick Reply ID is required.");
+  }
+
+  return doc(getQuickReplyCollection(userId), replyId);
+}
+
+function validateQuickReply(data: {
+  title: string;
+  shortcut: string;
+  message: string;
+}) {
+  const title = data.title.trim();
+  const shortcut = data.shortcut.trim().replace(/^\/+/, "").toLowerCase();
+  const message = data.message.trim();
+
+  if (!title || !message) {
+    throw new Error("Title and message are required.");
+  }
+
+  if (title.length > 60 || shortcut.length > 30 || message.length > 4096) {
+    throw new Error("Quick Reply is longer than the allowed limit.");
+  }
+
+  return { title, shortcut, message };
 }
 
 export function listenToQuickReplies(
@@ -60,22 +89,10 @@ export async function addQuickReply(
     message: string;
   }
 ) {
-  const title = data.title.trim();
-  const shortcut = data.shortcut.trim().replace(/^\/+/, "").toLowerCase();
-  const message = data.message.trim();
-
-  if (!title || !message) {
-    throw new Error("Title and message are required.");
-  }
-
-  if (title.length > 60 || shortcut.length > 30 || message.length > 4096) {
-    throw new Error("Quick Reply is longer than the allowed limit.");
-  }
+  const validData = validateQuickReply(data);
 
   return addDoc(getQuickReplyCollection(userId), {
-    title,
-    shortcut,
-    message,
+    ...validData,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -90,24 +107,12 @@ export async function updateQuickReply(
     message: string;
   }
 ) {
-  const title = data.title.trim();
-  const shortcut = data.shortcut.trim().replace(/^\/+/, "").toLowerCase();
-  const message = data.message.trim();
-
-  if (!title || !message) {
-    throw new Error("Title and message are required.");
-  }
-
-  if (title.length > 60 || shortcut.length > 30 || message.length > 4096) {
-    throw new Error("Quick Reply is longer than the allowed limit.");
-  }
+  const validData = validateQuickReply(data);
 
   return updateDoc(
-    doc(db, "users", userId, "quickReplies", replyId),
+    getQuickReplyDocument(userId, replyId),
     {
-      title,
-      shortcut,
-      message,
+      ...validData,
       updatedAt: serverTimestamp(),
     }
   );
@@ -117,7 +122,5 @@ export async function deleteQuickReply(
   userId: string,
   replyId: string
 ) {
-  return deleteDoc(
-    doc(db, "users", userId, "quickReplies", replyId)
-  );
+  return deleteDoc(getQuickReplyDocument(userId, replyId));
 }
