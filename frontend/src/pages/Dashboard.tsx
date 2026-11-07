@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   Search,
   Send,
   LogOut,
   MessageCircle,
   Menu,
-  X,
   Loader2
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
@@ -46,6 +46,7 @@ export default function Dashboard() {
   const [selectedChat, setSelectedChat] = useState<AnyRecord | null>(null);
   const [messages, setMessages] = useState<AnyRecord[]>([]);
   const [message, setMessage] = useState("");
+  const [messageSource, setMessageSource] = useState<"manual" | "quick_reply">("manual");
   const [search, setSearch] = useState("");
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -109,6 +110,7 @@ export default function Dashboard() {
 
   function handleComposerChange(value: string) {
     setMessage(value);
+    setMessageSource("manual");
     setError("");
 
     if (value.startsWith("/")) {
@@ -120,16 +122,19 @@ export default function Dashboard() {
 
   function insertQuickReply(value: string) {
     setMessage(value);
+    setMessageSource("quick_reply");
     setSlashQuery(null);
+    setError("");
   }
 
-  async function handleSend(event: React.FormEvent<HTMLFormElement>) {
+  async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (!selectedChat || !message.trim() || sending) return;
 
     const text = message.trim();
     const phone = selectedChat.customerPhone;
+    const source = messageSource;
 
     if (!phone) {
       setError("Is chat ka customer phone number nahi mila.");
@@ -143,10 +148,12 @@ export default function Dashboard() {
       await sendWhatsAppMessage(
         phone,
         text,
-        selectedChat.id
+        selectedChat.id,
+        source
       );
 
       setMessage("");
+      setMessageSource("manual");
       setSlashQuery(null);
     } catch (err) {
       console.error("Message send failed:", err);
@@ -437,4 +444,4 @@ export default function Dashboard() {
       </main>
     </div>
   );
-              }
+}
