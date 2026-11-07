@@ -19,8 +19,8 @@ export interface ChatMessage {
   type: "text";
   text: string;
   timestamp: Timestamp | null;
-  status?: "sent" | "delivered" | "read" | "failed";
-  source?: "manual" | "quick_reply" | "webhook";
+  status?: "received" | "sent" | "delivered" | "read" | "failed" | "unknown";
+  source?: "manual" | "quick_reply" | "whatsapp" | "webhook";
 }
 
 export interface QuickReply {
