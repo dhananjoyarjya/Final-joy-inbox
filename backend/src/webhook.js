@@ -1,3 +1,4 @@
+
 const { getDb } = require("./firebase");
 const { verifyMetaSignature, getRawBody } = require("./security");
 const { normalizePhoneNumber } = require("./whatsapp");
@@ -60,13 +61,15 @@ async function saveIncomingMessage(message, contactName) {
     return;
   }
 
-  // This first version stores text messages only.
+  // This version stores text messages only.
   if (message.type !== "text" || !message.text?.body) {
     return;
   }
 
   const text = message.text.body;
+
   const chatRef = db.collection("chats").doc(phone);
+
   const messageRef = chatRef
     .collection("messages")
     .doc(messageId);
@@ -88,20 +91,17 @@ async function saveIncomingMessage(message, contactName) {
       ? new Date(Number(message.timestamp) * 1000)
       : new Date();
 
-    transaction.set(
-      messageRef,
-      {
-        messageId,
-        chatId: phone,
-        direction: "incoming",
-        type: "text",
-        text,
-        timestamp,
-        status: "received",
-        source: "whatsapp",
-        sender: phone
-      }
-    );
+    transaction.set(messageRef, {
+      messageId,
+      chatId: phone,
+      direction: "incoming",
+      type: "text",
+      text,
+      timestamp,
+      status: "received",
+      source: "whatsapp",
+      sender: phone
+    });
 
     transaction.set(
       chatRef,
@@ -157,8 +157,6 @@ async function updateMessageStatus(status) {
 }
 
 async function processWebhookPayload(payload) {
-  const db = getDb();
-
   for (const entry of payload.entry || []) {
     for (const change of entry.changes || []) {
       const value = change.value || {};
@@ -185,18 +183,43 @@ async function processWebhookPayload(payload) {
 }
 
 async function receiveWebhook(event) {
-  if (!verifyMetaSignature(event)) {
+  // Handle signature verification errors safely.
+  try {
+    if (!verifyMetaSignature(event)) {
+      return {
+        statusCode: 401,
+        body: "Invalid webhook signature."
+      };
+    }
+  } catch (error) {
+    console.error(
+      "Webhook signature verification failed:",
+      error
+    );
+
     return {
-      statusCode: 401,
-      body: "Invalid webhook signature."
+      statusCode: 500,
+      body: "Webhook signature verification failed."
     };
   }
 
   let payload;
 
   try {
-    payload = JSON.parse(getRawBody(event).toString("utf8"));
-  } catch {
+    const rawBody = getRawBody(event).toString("utf8");
+
+    payload = JSON.parse(rawBody);
+
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload)
+    ) {
+      throw new Error("Invalid webhook payload.");
+    }
+  } catch (error) {
+    console.error("Webhook payload parsing failed:", error);
+
     return {
       statusCode: 400,
       body: "Invalid JSON payload."
