@@ -9,6 +9,9 @@ export interface Chat {
   unreadCount: number;
   pinned: boolean;
   archived: boolean;
+  lastMessageDirection?: "incoming" | "outgoing";
+  greetingStatus?: "sending" | "sent" | "failed" | "outside_service_window";
+  greetingLastError?: string | null;
 }
 
 export interface ChatMessage {
@@ -16,11 +19,19 @@ export interface ChatMessage {
   chatId: string;
   messageId: string;
   direction: "incoming" | "outgoing";
-  type: "text";
+  type: string;
   text: string;
   timestamp: Timestamp | null;
+  mediaId?: string | null;
+  mediaStoragePath?: string | null;
+  mediaMimeType?: string | null;
+  mediaSize?: number | null;
+  mediaFilename?: string | null;
+  mediaDownloadError?: string | null;
   status?: "received" | "sent" | "delivered" | "read" | "failed" | "unknown";
   source?: "manual" | "quick_reply" | "whatsapp" | "webhook";
+  pinned?: boolean;
+  replyToMessageId?: string;
 }
 
 export interface QuickReply {
@@ -29,6 +40,17 @@ export interface QuickReply {
   shortcut: string;
   message: string;
   createdAt: Timestamp | null;
+  updatedAt?: Timestamp | null;
+}
+
+export interface Contact {
+  id: string;
+  name: string;
+  phone: string;
+  email?: string;
+  notes?: string;
+  source: "local" | "whatsapp";
+  createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
 }
 

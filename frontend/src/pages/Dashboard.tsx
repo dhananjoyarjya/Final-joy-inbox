@@ -1,123 +1,952 @@
-
-import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
-  Search,
-  Send,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import {
+  Archive,
+  ArchiveRestore,
+  ArrowLeft,
+  Bell,
+  Check,
+  CheckCheck,
+  ContactRound,
+  CircleCheck,
+  CircleX,
+  Copy,
+  Forward,
+  Inbox,
+  Loader2,
   LogOut,
   MessageCircle,
-  Menu,
-  Loader2
+  MessageSquareText,
+  Paperclip,
+  Pencil,
+  Pin,
+  Reply,
+  Trash2,
+  Search,
+  Send,
+  Settings,
+  Sun,
+  RefreshCw,
+  UsersRound,
+  X,
 } from "lucide-react";
+import { MotionConfig, motion } from "framer-motion";
+import { useSearchParams } from "react-router-dom";
+import MessageMedia from "../components/MessageMedia";
+import ContactsPanel from "../components/ContactsPanel";
 import { useAuth } from "../context/AuthContext";
 import { logout } from "../services/auth";
 import {
   listenToChats,
-  listenToMessages
+  listenToMessages,
+  listenToPinnedMessages,
+  loadOlderMessages,
+  loadOlderChats,
+  getChatById,
 } from "../services/chats";
-import { sendWhatsAppMessage } from "../services/whatsapp";
+import {
+  disablePushNotifications,
+  enablePushNotifications,
+  syncPushToken,
+} from "../services/pushNotifications";
+import {
+  sendWhatsAppMessage,
+  sendWhatsAppAttachment,
+  updateWhatsAppChatState,
+  deleteWhatsAppChats,
+  deleteWhatsAppMessages,
+  updateWhatsAppMessageState,
+  validateWhatsAppAttachment,
+  getWhatsAppConnectionStatus,
+  getGreetingSettings,
+  saveGreetingSettings,
+} from "../services/whatsapp";
 import QuickReplies from "../components/QuickReplies";
+import type { Chat, ChatMessage } from "../types";
+import type { DocumentData, QueryDocumentSnapshot } from "firebase/firestore";
 
-type AnyRecord = Record<string, any>;
+type View = "chats" | "contacts" | "replies" | "archived" | "settings";
+type ChatFilter = "all" | "unread" | "pinned";
+type Theme = "light" | "dark" | "system";
+type MessageActionMenu = { message: ChatMessage; x: number; y: number };
 
-function formatTime(value: any): string {
-  if (!value) return "";
-
+function asDate(value: unknown): Date | null {
+  if (!value) return null;
   const date =
-    typeof value?.toDate === "function"
-      ? value.toDate()
-      : new Date(value);
-
-  if (Number.isNaN(date.getTime())) return "";
-
-  return date.toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit"
-  });
+    typeof (value as { toDate?: () => Date }).toDate === "function"
+      ? (value as { toDate: () => Date }).toDate()
+      : new Date(value as string | number | Date);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function getMessageText(message: AnyRecord): string {
-  return message.text || message.message || "";
+function formatTime(value: unknown): string {
+  const date = asDate(value);
+  if (!date) return "";
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function initials(name?: string, phone?: string): string {
+  const value = (name && name !== phone ? name : phone) || "?";
+  return value.trim().slice(0, 1).toUpperCase();
+}
+
+function displayName(chat: Chat): string {
+  return chat.customerName && chat.customerName !== chat.customerPhone
+    ? chat.customerName
+    : chat.customerPhone;
+}
+
+function statusLabel(status?: ChatMessage["status"]): string {
+  if (status === "delivered") return "Delivered";
+  if (status === "read") return "Read";
+  if (status === "failed") return "Failed";
+  if (status === "sent") return "Sent";
+  return "";
+}
+
+function playSendSound() {
+  if (!("AudioContext" in window)) return;
+
+  try {
+    const audioContext = new AudioContext();
+    const oscillator = audioContext.createOscillator();
+    const volume = audioContext.createGain();
+    const startTime = audioContext.currentTime;
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(660, startTime);
+    oscillator.frequency.setValueAtTime(880, startTime + 0.045);
+    volume.gain.setValueAtTime(0.0001, startTime);
+    volume.gain.exponentialRampToValueAtTime(0.045, startTime + 0.012);
+    volume.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.12);
+    oscillator.connect(volume);
+    volume.connect(audioContext.destination);
+    oscillator.onended = () => {
+      void audioContext.close().catch((soundError: unknown) => {
+        console.error("Send sound audio context could not be closed:", soundError);
+      });
+    };
+    oscillator.start(startTime);
+    oscillator.stop(startTime + 0.13);
+    if (audioContext.state === "suspended") {
+      void audioContext.resume().catch((soundError: unknown) => {
+        console.error("Send sound could not be played:", soundError);
+      });
+    }
+  } catch (soundError) {
+    console.error("Send sound could not be played:", soundError);
+  }
 }
 
 export default function Dashboard() {
   const { user } = useAuth();
-
-  const [chats, setChats] = useState<AnyRecord[]>([]);
-  const [selectedChat, setSelectedChat] = useState<AnyRecord | null>(null);
-  const [messages, setMessages] = useState<AnyRecord[]>([]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [recentChats, setRecentChats] = useState<Chat[]>([]);
+  const [olderChats, setOlderChats] = useState<Chat[]>([]);
+  const [chatCursor, setChatCursor] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [hasOlderChats, setHasOlderChats] = useState(false);
+  const [loadingOlderChats, setLoadingOlderChats] = useState(false);
+  const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [pinnedMessages, setPinnedMessages] = useState<ChatMessage[]>([]);
+  const [recentMessages, setRecentMessages] = useState<ChatMessage[]>([]);
+  const [olderMessages, setOlderMessages] = useState<ChatMessage[]>([]);
+  const [messageCursor, setMessageCursor] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [message, setMessage] = useState("");
   const [messageSource, setMessageSource] = useState<"manual" | "quick_reply">("manual");
+  const [attachment, setAttachment] = useState<File | null>(null);
   const [search, setSearch] = useState("");
+  const [messageSearch, setMessageSearch] = useState("");
+  const [showPinnedMessages, setShowPinnedMessages] = useState(false);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
+  const [messageActionMenu, setMessageActionMenu] = useState<MessageActionMenu | null>(null);
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  const [forwardMessageIds, setForwardMessageIds] = useState<string[] | null>(null);
+  const [forwardingMessages, setForwardingMessages] = useState(false);
+  const [deletingMessages, setDeletingMessages] = useState(false);
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [busyAction, setBusyAction] = useState(false);
+  const [selectedChatIds, setSelectedChatIds] = useState<Set<string>>(new Set());
+  const [deletingChats, setDeletingChats] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [error, setError] = useState("");
+  const [listError, setListError] = useState("");
   const [mobileListOpen, setMobileListOpen] = useState(true);
+  const [view, setView] = useState<View>("chats");
+  const [filter, setFilter] = useState<ChatFilter>("all");
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [theme, setTheme] = useState<Theme>(
+    () => (localStorage.getItem("unlimited-sender-theme") as Theme) || "system"
+  );
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    () =>
+      localStorage.getItem("unlimited-sender-notifications") === "enabled" &&
+      typeof Notification !== "undefined" &&
+      Notification.permission === "granted"
+  );
+  const [notificationsBusy, setNotificationsBusy] = useState(false);
+  const [notificationError, setNotificationError] = useState("");
+  const [connectionStatus, setConnectionStatus] = useState<Awaited<ReturnType<typeof getWhatsAppConnectionStatus>> | null>(null);
+  const [checkingConnection, setCheckingConnection] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
+  const [greetingEnabled, setGreetingEnabled] = useState(false);
+  const [greetingText, setGreetingText] = useState("");
+  const [greetingLoading, setGreetingLoading] = useState(false);
+  const [greetingSaving, setGreetingSaving] = useState(false);
+  const [greetingError, setGreetingError] = useState("");
+  const [greetingSaved, setGreetingSaved] = useState(false);
+  const uploadController = useRef<AbortController | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const conversationPanelRef = useRef<HTMLElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const chatLongPressTimer = useRef<number | null>(null);
+  const chatLongPressPoint = useRef<{ x: number; y: number } | null>(null);
+  const suppressChatClick = useRef(false);
+  const messageLongPressTimer = useRef<number | null>(null);
+  const messageLongPressPoint = useRef<{ x: number; y: number } | null>(null);
+  const suppressMessageClick = useRef<string | null>(null);
+  const pendingChatDeletionIds = useRef<Set<string>>(new Set());
+  const slashKeyHandler = useRef<((key: string) => boolean) | null>(null);
+
+  function registerSlashKeyHandler(handler: ((key: string) => boolean) | null) {
+    slashKeyHandler.current = handler;
+  }
+
+  useEffect(() => () => {
+    uploadController.current?.abort();
+    if (chatLongPressTimer.current !== null) {
+      window.clearTimeout(chatLongPressTimer.current);
+    }
+    if (messageLongPressTimer.current !== null) {
+      window.clearTimeout(messageLongPressTimer.current);
+    }
+  }, []);
 
   useEffect(() => {
-    const unsubscribe = listenToChats((items: AnyRecord[]) => {
-      setChats(items);
-      setLoadingChats(false);
+    if (!messageActionMenu) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMessageActionMenu(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [messageActionMenu]);
 
-      setSelectedChat((current) => {
-        if (!current) return current;
+  useEffect(() => {
+    const panel = conversationPanelRef.current;
+    const viewport = window.visualViewport;
+    if (!panel || !viewport) return;
 
-        return (
-          items.find((chat) => chat.id === current.id) || current
-        );
-      });
-    });
+    const syncConversationViewport = () => {
+      if (window.matchMedia("(max-width: 680px)").matches) {
+        panel.style.setProperty("--chat-viewport-height", `${viewport.height}px`);
+        panel.style.setProperty("--chat-viewport-offset-top", `${viewport.offsetTop}px`);
+      } else {
+        panel.style.removeProperty("--chat-viewport-height");
+        panel.style.removeProperty("--chat-viewport-offset-top");
+      }
+    };
 
-    return () => unsubscribe();
+    syncConversationViewport();
+    viewport.addEventListener("resize", syncConversationViewport);
+    viewport.addEventListener("scroll", syncConversationViewport);
+    window.addEventListener("resize", syncConversationViewport);
+
+    return () => {
+      viewport.removeEventListener("resize", syncConversationViewport);
+      viewport.removeEventListener("scroll", syncConversationViewport);
+      window.removeEventListener("resize", syncConversationViewport);
+      panel.style.removeProperty("--chat-viewport-height");
+      panel.style.removeProperty("--chat-viewport-offset-top");
+    };
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = listenToChats(
+      (items, cursor, hasOlder) => {
+        for (const chatId of pendingChatDeletionIds.current) {
+          if (!items.some((chat) => chat.id === chatId)) {
+            pendingChatDeletionIds.current.delete(chatId);
+          }
+        }
+        setRecentChats(items.filter((chat) => !pendingChatDeletionIds.current.has(chat.id)));
+        setChatCursor((current) => current || cursor);
+        setHasOlderChats(hasOlder);
+        setLoadingChats(false);
+        setListError("");
+        setSelectedChat((current) =>
+          current ? items.find((chat) => chat.id === current.id) || current : current
+        );
+      },
+      (listenerError) => {
+        console.error("Chat list listener failed:", listenerError);
+        setListError("Chats could not be loaded. Check your connection and retry.");
+        setLoadingChats(false);
+      }
+    );
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!user || !notificationsEnabled) return;
+
+    let active = true;
+    let syncing = false;
+    const synchronizeToken = () => {
+      if (syncing) return;
+      syncing = true;
+      void syncPushToken()
+        .then(() => {
+          if (active) setNotificationError("");
+        })
+        .catch((syncError: unknown) => {
+          console.error("Push token refresh failed:", syncError);
+          if (active) {
+            setNotificationError(
+              syncError instanceof Error
+                ? syncError.message
+                : "Push notification registration could not be refreshed."
+            );
+          }
+        })
+        .finally(() => {
+          syncing = false;
+        });
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") synchronizeToken();
+    };
+
+    synchronizeToken();
+    const refreshTimer = window.setInterval(synchronizeToken, 12 * 60 * 60 * 1000);
+    window.addEventListener("focus", synchronizeToken);
+    window.addEventListener("online", synchronizeToken);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      active = false;
+      window.clearInterval(refreshTimer);
+      window.removeEventListener("focus", synchronizeToken);
+      window.removeEventListener("online", synchronizeToken);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [notificationsEnabled, user?.uid]);
+
+  useEffect(() => {
+    const notificationChatId = searchParams.get("chatId");
+    if (!notificationChatId || loadingChats) return;
+
+    let active = true;
+    const openChat = async () => {
+      const chat =
+        chats.find((item) => item.id === notificationChatId) ||
+        (await getChatById(notificationChatId));
+      if (!active) return;
+
+      if (chat) {
+        void selectChat(chat);
+      } else {
+        setError("The conversation opened from this notification could not be found.");
+      }
+
+      setSearchParams((current) => {
+        current.delete("chatId");
+        current.delete("messageId");
+        return current;
+      }, { replace: true });
+    };
+
+    void openChat().catch((openError: unknown) => {
+      console.error("Could not open notification conversation:", openError);
+      if (active) {
+        setError(
+          openError instanceof Error
+            ? openError.message
+            : "The conversation opened from this notification could not be loaded."
+        );
+        setSearchParams((current) => {
+          current.delete("chatId");
+          current.delete("messageId");
+          return current;
+        }, { replace: true });
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [chats, loadingChats, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    const allChats = new Map<string, Chat>();
+    for (const chat of [...recentChats, ...olderChats]) allChats.set(chat.id, chat);
+    setChats([...allChats.values()]);
+  }, [olderChats, recentChats]);
 
   useEffect(() => {
     if (!selectedChat?.id) {
       setMessages([]);
+      setRecentMessages([]);
+      setOlderMessages([]);
+      setPinnedMessages([]);
+      setMessageCursor(null);
+      setHasOlderMessages(false);
       return;
     }
 
     setLoadingMessages(true);
-
+    setOlderMessages([]);
+    setMessageCursor(null);
+    setHasOlderMessages(false);
     const unsubscribe = listenToMessages(
       selectedChat.id,
-      (items: AnyRecord[]) => {
-        setMessages(items);
+      (items, cursor, hasOlder) => {
+        setRecentMessages(items);
+        setMessageCursor((current) => current || cursor);
+        setHasOlderMessages(hasOlder);
+        setLoadingMessages(false);
+        setError("");
+      },
+      (listenerError) => {
+        console.error("Message history listener failed:", listenerError);
+        setError("Messages could not be loaded. Check access and connection.");
         setLoadingMessages(false);
       }
     );
-
-    return () => unsubscribe();
+    const unsubscribePinned = listenToPinnedMessages(
+      selectedChat.id,
+      setPinnedMessages,
+      (listenerError) => {
+        console.error("Pinned message listener failed:", listenerError);
+        setError("Pinned messages could not be loaded.");
+      }
+    );
+    return () => {
+      unsubscribe();
+      unsubscribePinned();
+    };
   }, [selectedChat?.id]);
 
-  const filteredChats = useMemo(() => {
-    const term = search.trim().toLowerCase();
+  useEffect(() => {
+    const allMessages = new Map<string, ChatMessage>();
+    for (const item of [...olderMessages, ...recentMessages]) {
+      allMessages.set(item.id || item.messageId, item);
+    }
+    const ordered = [...allMessages.values()].sort((a, b) => {
+      const aTime = asDate(a.timestamp)?.getTime() || 0;
+      const bTime = asDate(b.timestamp)?.getTime() || 0;
+      return aTime - bTime || (a.id || a.messageId).localeCompare(b.id || b.messageId);
+    });
+    setMessages(ordered);
+  }, [olderMessages, recentMessages]);
 
-    if (!term) return chats;
+  useEffect(() => {
+    const root = document.documentElement;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      root.dataset.theme = theme === "system" ? (media.matches ? "dark" : "light") : theme;
+    };
+    applyTheme();
+    media.addEventListener("change", applyTheme);
+    return () => media.removeEventListener("change", applyTheme);
+  }, [theme]);
 
-    return chats.filter((chat) =>
-      [
-        chat.customerName,
-        chat.customerPhone,
-        chat.lastMessage
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(term)
+  useEffect(() => {
+    localStorage.setItem("unlimited-sender-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (view !== "settings" || !user?.uid) return;
+    let active = true;
+    setGreetingLoading(true);
+    setGreetingError("");
+    getGreetingSettings()
+      .then((settings) => {
+        if (!active) return;
+        setGreetingEnabled(settings.enabled);
+        setGreetingText(settings.text);
+      })
+      .catch((settingsError: unknown) => {
+        if (!active) return;
+        console.error("Greeting settings load failed:", settingsError);
+        setGreetingError(settingsError instanceof Error ? settingsError.message : "Greeting settings could not be loaded.");
+      })
+      .finally(() => {
+        if (active) setGreetingLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [user?.uid, view]);
+
+  const visibleChats = useMemo(() => {
+    const term = search.trim().toLocaleLowerCase();
+    return chats.filter((chat) => {
+      if (view === "archived" ? !chat.archived : chat.archived) return false;
+      if (view === "contacts") {
+        return !term || `${chat.customerName} ${chat.customerPhone}`.toLowerCase().includes(term);
+      }
+      if (filter === "unread" && !chat.unreadCount) return false;
+      if (filter === "pinned" && !chat.pinned) return false;
+      return (
+        !term ||
+        `${chat.customerName} ${chat.customerPhone} ${chat.lastMessage}`
+          .toLocaleLowerCase()
+          .includes(term)
+      );
+    }).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+  }, [chats, filter, search, view]);
+
+  const visibleMessages = useMemo(() => {
+    const source = showPinnedMessages ? pinnedMessages : messages;
+    const term = messageSearch.trim().toLocaleLowerCase();
+    if (!term) return source;
+    return source.filter((item) => (item.text || "").toLocaleLowerCase().includes(term));
+  }, [messages, messageSearch, pinnedMessages, showPinnedMessages]);
+
+  async function loadEarlierMessages() {
+    if (!selectedChat || !messageCursor || loadingOlderMessages) return;
+    setLoadingOlderMessages(true);
+    setError("");
+    try {
+      const page = await loadOlderMessages(selectedChat.id, messageCursor);
+      setOlderMessages((current) => [...page.messages, ...current]);
+      setMessageCursor(page.cursor);
+      setHasOlderMessages(page.hasOlder);
+    } catch (historyError) {
+      console.error("Older message history load failed:", historyError);
+      setError(historyError instanceof Error ? historyError.message : "Earlier messages could not be loaded.");
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  }
+
+  async function loadEarlierChats() {
+    if (!chatCursor || loadingOlderChats) return;
+    setLoadingOlderChats(true);
+    setListError("");
+    try {
+      const page = await loadOlderChats(chatCursor);
+      setOlderChats((current) => [...current, ...page.chats]);
+      setChatCursor(page.cursor);
+      setHasOlderChats(page.hasOlder);
+    } catch (historyError) {
+      console.error("Older conversation load failed:", historyError);
+      setListError(historyError instanceof Error ? historyError.message : "Older conversations could not be loaded.");
+    } finally {
+      setLoadingOlderChats(false);
+    }
+  }
+
+  function getMessageDocumentId(item: ChatMessage) {
+    return item.id || item.messageId;
+  }
+
+  function findMessageById(messageId: string) {
+    return (
+      messages.find((item) => getMessageDocumentId(item) === messageId) ||
+      pinnedMessages.find((item) => getMessageDocumentId(item) === messageId)
     );
-  }, [chats, search]);
+  }
+
+  function openMessageActionMenu(item: ChatMessage, x: number, y: number) {
+    const menuWidth = 250;
+    setMessageActionMenu({
+      message: item,
+      x: Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(y, window.innerHeight - 420)),
+    });
+  }
+
+  function cancelMessageLongPress() {
+    if (messageLongPressTimer.current !== null) {
+      window.clearTimeout(messageLongPressTimer.current);
+      messageLongPressTimer.current = null;
+    }
+    messageLongPressPoint.current = null;
+  }
+
+  function startMessageLongPress(
+    item: ChatMessage,
+    event: ReactPointerEvent<HTMLDivElement>
+  ) {
+    suppressMessageClick.current = null;
+    if (
+      event.target instanceof Element &&
+      event.target.closest("button, a, input, video, audio")
+    ) {
+      return;
+    }
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    cancelMessageLongPress();
+    messageLongPressPoint.current = { x: event.clientX, y: event.clientY };
+    messageLongPressTimer.current = window.setTimeout(() => {
+      messageLongPressTimer.current = null;
+      messageLongPressPoint.current = null;
+      suppressMessageClick.current = getMessageDocumentId(item);
+      setSelectedMessageIds((current) =>
+        current.has(getMessageDocumentId(item))
+          ? current
+          : new Set(current).add(getMessageDocumentId(item))
+      );
+      openMessageActionMenu(item, event.clientX, event.clientY);
+    }, 500);
+  }
+
+  function moveMessageLongPress(event: ReactPointerEvent<HTMLDivElement>) {
+    const point = messageLongPressPoint.current;
+    if (
+      point &&
+      (Math.abs(event.clientX - point.x) > 10 || Math.abs(event.clientY - point.y) > 10)
+    ) {
+      cancelMessageLongPress();
+    }
+  }
+
+  function toggleMessageSelection(item: ChatMessage) {
+    const id = getMessageDocumentId(item);
+    setSelectedMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function handleMessageClick(item: ChatMessage) {
+    if (suppressMessageClick.current === getMessageDocumentId(item)) {
+      suppressMessageClick.current = null;
+      return;
+    }
+    suppressMessageClick.current = null;
+    if (selectedMessageIds.size > 0) toggleMessageSelection(item);
+  }
+
+  function cancelMessageSelection() {
+    setSelectedMessageIds(new Set());
+    setMessageActionMenu(null);
+  }
+
+  async function setMessagePinned(item: ChatMessage) {
+    if (!selectedChat) return;
+    setBusyAction(true);
+    setMessageActionMenu(null);
+    setError("");
+    try {
+      await updateWhatsAppMessageState(
+        selectedChat.id,
+        getMessageDocumentId(item),
+        !item.pinned
+      );
+    } catch (actionError) {
+      console.error("Message pin state update failed:", actionError);
+      setError(actionError instanceof Error ? actionError.message : "Message could not be updated.");
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  async function deleteMessagesFromInbox(messageIds: string[], confirm: boolean) {
+    if (!selectedChat || deletingMessages || !messageIds.length) return;
+    if (
+      confirm &&
+      !window.confirm(
+        `Permanently delete ${messageIds.length} selected message${messageIds.length === 1 ? "" : "s"} from this inbox? This does not delete messages from the customer's WhatsApp.`
+      )
+    ) {
+      return;
+    }
+
+    setDeletingMessages(true);
+    setMessageActionMenu(null);
+    setError("");
+    const deletedIds = new Set<string>();
+    try {
+      for (let index = 0; index < messageIds.length; index += 50) {
+        const batch = messageIds.slice(index, index + 50);
+        const result = await deleteWhatsAppMessages(selectedChat.id, batch);
+        if (!batch.every((id) => result.deletedMessageIds.includes(id))) {
+          throw new Error("The server did not confirm deletion of every selected message.");
+        }
+        batch.forEach((id) => deletedIds.add(id));
+        setRecentMessages((current) =>
+          current.filter((item) => !deletedIds.has(getMessageDocumentId(item)))
+        );
+        setOlderMessages((current) =>
+          current.filter((item) => !deletedIds.has(getMessageDocumentId(item)))
+        );
+        setPinnedMessages((current) =>
+          current.filter((item) => !deletedIds.has(getMessageDocumentId(item)))
+        );
+        setSelectedMessageIds((current) =>
+          new Set([...current].filter((id) => !deletedIds.has(id)))
+        );
+      }
+      setSelectedMessageIds(new Set());
+    } catch (deleteError) {
+      console.error("Message deletion failed:", deleteError);
+      setError(
+        deletedIds.size
+          ? `${deletedIds.size} message${deletedIds.size === 1 ? "" : "s"} deleted; remaining messages could not be deleted. ${deleteError instanceof Error ? deleteError.message : ""}`
+          : deleteError instanceof Error
+            ? deleteError.message
+            : "Messages could not be deleted."
+      );
+    } finally {
+      setDeletingMessages(false);
+    }
+  }
+
+  function beginReply(item: ChatMessage) {
+    setReplyTo(item);
+    setMessageSource("manual");
+    setMessageActionMenu(null);
+    window.setTimeout(() => composerInputRef.current?.focus(), 0);
+  }
+
+  function beginForward(messageIds: string[]) {
+    const selected = messageIds.map(findMessageById);
+    if (
+      selected.some((item) => !item || item.type !== "text" || !item.text?.trim())
+    ) {
+      setError("Only text messages can be forwarded. Media forwarding is not supported.");
+      return;
+    }
+    setMessageActionMenu(null);
+    setForwardMessageIds(messageIds);
+  }
+
+  async function forwardMessagesToChat(chat: Chat) {
+    if (!forwardMessageIds?.length || forwardingMessages) return;
+    const selected = forwardMessageIds.map(findMessageById);
+    if (selected.some((item) => !item || item.type !== "text" || !item.text?.trim())) {
+      setError("The selected text is no longer available to forward.");
+      setForwardMessageIds(null);
+      return;
+    }
+
+    setForwardingMessages(true);
+    setError("");
+    let sentCount = 0;
+    try {
+      for (const item of selected) {
+        await sendWhatsAppMessage(
+          chat.customerPhone,
+          item!.text,
+          chat.id,
+          "manual"
+        );
+        sentCount++;
+      }
+      setForwardMessageIds(null);
+      setSelectedMessageIds(new Set());
+    } catch (forwardError) {
+      console.error("Message forwarding failed:", forwardError);
+      setError(
+        sentCount
+          ? `${sentCount} message${sentCount === 1 ? "" : "s"} forwarded; the next message could not be sent. ${forwardError instanceof Error ? forwardError.message : ""}`
+          : forwardError instanceof Error
+            ? forwardError.message
+            : "The selected messages could not be forwarded."
+      );
+    } finally {
+      setForwardingMessages(false);
+    }
+  }
+
+  async function selectChat(chat: Chat) {
+    setSelectedChatIds(new Set());
+    setSelectedMessageIds(new Set());
+    setReplyTo(null);
+    setShowPinnedMessages(false);
+    setDeleteError("");
+    uploadController.current?.abort();
+    uploadController.current = null;
+    setAttachment(null);
+    setUploadProgress(0);
+    setSelectedChat(chat);
+    setMobileListOpen(false);
+    setView("chats");
+    setError("");
+    setMessageSearch("");
+    if (chat.unreadCount > 0) {
+      try {
+        await updateWhatsAppChatState(chat.id, { markRead: true });
+      } catch (actionError) {
+        console.error("Mark conversation read failed:", actionError);
+        setError("Conversation opened, but its unread count could not be cleared.");
+      }
+    }
+  }
+
+  async function updateChat(
+    chat: Chat,
+    state: { pinned?: boolean; archived?: boolean }
+  ) {
+    if (busyAction) return;
+    setBusyAction(true);
+    setError("");
+    try {
+      await updateWhatsAppChatState(chat.id, state);
+    } catch (actionError) {
+      console.error("Conversation update failed:", actionError);
+      setError(
+        actionError instanceof Error
+          ? actionError.message
+          : "Conversation could not be updated."
+      );
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  function cancelChatLongPress() {
+    if (chatLongPressTimer.current !== null) {
+      window.clearTimeout(chatLongPressTimer.current);
+      chatLongPressTimer.current = null;
+    }
+    chatLongPressPoint.current = null;
+  }
+
+  function startChatLongPress(chatId: string, event: ReactPointerEvent<HTMLButtonElement>) {
+    if (
+      (view !== "chats" && view !== "archived") ||
+      selectedChatIds.size > 0 ||
+      deletingChats ||
+      event.button !== 0
+    ) return;
+    cancelChatLongPress();
+    chatLongPressPoint.current = { x: event.clientX, y: event.clientY };
+    chatLongPressTimer.current = window.setTimeout(() => {
+      chatLongPressTimer.current = null;
+      chatLongPressPoint.current = null;
+      suppressChatClick.current = true;
+      setDeleteError("");
+      setSelectedChatIds((current) => new Set(current).add(chatId));
+    }, 500);
+  }
+
+  function moveChatLongPress(event: ReactPointerEvent<HTMLButtonElement>) {
+    const point = chatLongPressPoint.current;
+    if (
+      point &&
+      (Math.abs(event.clientX - point.x) > 10 || Math.abs(event.clientY - point.y) > 10)
+    ) {
+      cancelChatLongPress();
+    }
+  }
+
+  function handleChatRowClick(chat: Chat) {
+    if (deletingChats) return;
+    if (suppressChatClick.current) {
+      suppressChatClick.current = false;
+      return;
+    }
+    if (selectedChatIds.size > 0) {
+      setSelectedChatIds((current) => {
+        const next = new Set(current);
+        if (next.has(chat.id)) next.delete(chat.id);
+        else next.add(chat.id);
+        return next;
+      });
+      setDeleteError("");
+      return;
+    }
+    void selectChat(chat);
+  }
+
+  async function deleteSelectedChats() {
+    const chatIds = [...selectedChatIds];
+    if (!chatIds.length || deletingChats) return;
+    const confirmed = window.confirm(
+      `Permanently delete ${chatIds.length} selected conversation${chatIds.length === 1 ? "" : "s"} and all their messages? Contacts, quick replies, and greeting settings will remain.`
+    );
+    if (!confirmed) return;
+
+    setDeleteError("");
+    setDeletingChats(true);
+
+    const deletedIds = new Set<string>();
+    const failureMessages = new Map<string, string>();
+    for (let index = 0; index < chatIds.length; index += 50) {
+      const batch = chatIds.slice(index, index + 50);
+      try {
+        const result = await deleteWhatsAppChats(batch);
+        const batchIds = new Set(batch);
+        const newlyDeletedIds = result.deletedChatIds.filter(
+          (chatId) => batchIds.has(chatId) && !deletedIds.has(chatId)
+        );
+        for (const chatId of newlyDeletedIds) {
+          deletedIds.add(chatId);
+          pendingChatDeletionIds.current.add(chatId);
+        }
+        if (newlyDeletedIds.length) {
+          const newlyDeletedSet = new Set(newlyDeletedIds);
+          setRecentChats((current) => current.filter((chat) => !newlyDeletedSet.has(chat.id)));
+          setOlderChats((current) => current.filter((chat) => !newlyDeletedSet.has(chat.id)));
+          if (selectedChat?.id && newlyDeletedSet.has(selectedChat.id)) {
+            setSelectedChat(null);
+            setMobileListOpen(true);
+          }
+        }
+        for (const failure of result.errors) {
+          if (batchIds.has(failure.chatId) && !deletedIds.has(failure.chatId)) {
+            failureMessages.set(failure.chatId, failure.error);
+          }
+        }
+        for (const chatId of batch) {
+          if (!deletedIds.has(chatId) && !failureMessages.has(chatId)) {
+            failureMessages.set(chatId, "Conversation could not be deleted.");
+          }
+        }
+      } catch (deleteError) {
+        const messageText = deleteError instanceof Error
+          ? deleteError.message
+          : "Conversation could not be deleted.";
+        for (const chatId of batch) {
+          if (!deletedIds.has(chatId)) failureMessages.set(chatId, messageText);
+        }
+        for (const chatId of chatIds.slice(index + batch.length)) {
+          failureMessages.set(chatId, "Conversation was not deleted.");
+        }
+        break;
+      }
+    }
+
+    const failedIds = chatIds.filter((chatId) => !deletedIds.has(chatId));
+    if (failedIds.length) {
+      const failedIdSet = new Set(failedIds);
+      setSelectedChatIds(failedIdSet);
+      const firstError = failureMessages.get(failedIds[0]);
+      setDeleteError(
+        `${failedIds.length} conversation${failedIds.length === 1 ? "" : "s"} could not be deleted.${firstError ? ` ${firstError}` : ""}`
+      );
+    } else {
+      setSelectedChatIds(new Set());
+      setDeleteError("");
+    }
+    setDeletingChats(false);
+  }
 
   function handleComposerChange(value: string) {
     setMessage(value);
     setMessageSource("manual");
     setError("");
-
-    if (value.startsWith("/")) {
-      setSlashQuery(value.slice(1));
-    } else {
-      setSlashQuery(null);
-    }
+    setSlashQuery(value.startsWith("/") ? value.slice(1) : null);
   }
 
   function insertQuickReply(value: string) {
@@ -125,323 +954,894 @@ export default function Dashboard() {
     setMessageSource("quick_reply");
     setSlashQuery(null);
     setError("");
+    if (view === "replies") setView("chats");
   }
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-
-    if (!selectedChat || !message.trim() || sending) return;
-
+    if (!selectedChat || (!message.trim() && !attachment) || sending) return;
+    playSendSound();
     const text = message.trim();
-    const phone = selectedChat.customerPhone;
-    const source = messageSource;
-
-    if (!phone) {
-      setError("Is chat ka customer phone number nahi mila.");
-      return;
-    }
-
     setSending(true);
     setError("");
-
     try {
-      await sendWhatsAppMessage(
-        phone,
-        text,
-        selectedChat.id,
-        source
-      );
-
+      if (attachment) {
+        uploadController.current = new AbortController();
+        await sendWhatsAppAttachment(
+          selectedChat.customerPhone,
+          selectedChat.id,
+          attachment,
+          text,
+          messageSource,
+          uploadController.current.signal,
+          setUploadProgress,
+          replyTo ? getMessageDocumentId(replyTo) : undefined
+        );
+        setAttachment(null);
+        if (fileInput.current) fileInput.current.value = "";
+      } else {
+        await sendWhatsAppMessage(
+          selectedChat.customerPhone,
+          text,
+          selectedChat.id,
+          messageSource,
+          replyTo ? getMessageDocumentId(replyTo) : undefined
+        );
+      }
       setMessage("");
       setMessageSource("manual");
       setSlashQuery(null);
-    } catch (err) {
-      console.error("Message send failed:", err);
+      setReplyTo(null);
+    } catch (sendError) {
+      if (sendError instanceof DOMException && sendError.name === "AbortError") {
+        setError("Attachment upload cancelled.");
+        return;
+      }
+      console.error("Message send failed:", sendError);
       setError(
-        "Message send nahi hua. Number aur WhatsApp connection check karo."
+        sendError instanceof Error
+          ? sendError.message
+          : "Message was not sent. Check the WhatsApp connection and retry."
       );
     } finally {
       setSending(false);
+      setUploadProgress(0);
+      uploadController.current = null;
     }
+  }
+
+  function chooseAttachment(file?: File) {
+    if (!file) return;
+    setError("");
+    try {
+      validateWhatsAppAttachment(file);
+      setAttachment(file);
+    } catch (validationError) {
+      setAttachment(null);
+      setError(validationError instanceof Error ? validationError.message : "Attachment is invalid.");
+    }
+  }
+
+  function cancelUpload() {
+    uploadController.current?.abort();
   }
 
   async function handleLogout() {
     try {
       await logout();
-    } catch (err) {
-      console.error("Logout failed:", err);
-      setError("Logout nahi ho paya. Dobara try karo.");
+    } catch (logoutError) {
+      console.error("Logout failed:", logoutError);
+      setError("Sign out could not be completed. Please try again.");
     }
   }
 
+  async function enableNotifications() {
+    setNotificationsBusy(true);
+    setNotificationError("");
+    try {
+      await enablePushNotifications();
+      setNotificationsEnabled(true);
+      localStorage.setItem("unlimited-sender-notifications", "enabled");
+    } catch (notificationError) {
+      console.error("Browser notification permission request failed:", notificationError);
+      setNotificationError(
+        notificationError instanceof Error
+          ? notificationError.message
+          : "Push notifications could not be enabled."
+      );
+    } finally {
+      setNotificationsBusy(false);
+    }
+  }
+
+  async function turnOffNotifications() {
+    setNotificationsBusy(true);
+    setNotificationError("");
+    try {
+      await disablePushNotifications();
+      setNotificationsEnabled(false);
+      localStorage.setItem("unlimited-sender-notifications", "disabled");
+    } catch (notificationError) {
+      console.error("Push notification removal failed:", notificationError);
+      setNotificationError(
+        notificationError instanceof Error
+          ? notificationError.message
+          : "Push notifications could not be disabled."
+      );
+    } finally {
+      setNotificationsBusy(false);
+    }
+  }
+
+  async function checkConnection() {
+    setCheckingConnection(true);
+    setConnectionError("");
+    try {
+      setConnectionStatus(await getWhatsAppConnectionStatus());
+    } catch (statusError) {
+      console.error("Connection check failed:", statusError);
+      setConnectionError(statusError instanceof Error ? statusError.message : "Connection diagnostics failed.");
+    } finally {
+      setCheckingConnection(false);
+    }
+  }
+
+  async function saveGreeting() {
+    setGreetingSaving(true);
+    setGreetingError("");
+    setGreetingSaved(false);
+    try {
+      const settings = await saveGreetingSettings({
+        enabled: greetingEnabled,
+        text: greetingText,
+      });
+      setGreetingEnabled(settings.enabled);
+      setGreetingText(settings.text);
+      setGreetingSaved(true);
+    } catch (saveError) {
+      console.error("Greeting settings save failed:", saveError);
+      setGreetingError(saveError instanceof Error ? saveError.message : "Greeting settings could not be saved.");
+    } finally {
+      setGreetingSaving(false);
+    }
+  }
+
+  const navItems: { key: View; label: string; icon: typeof Inbox }[] = [
+    { key: "chats", label: "Chats", icon: Inbox },
+    { key: "contacts", label: "Contacts", icon: ContactRound },
+    { key: "replies", label: "Quick replies", icon: MessageSquareText },
+    { key: "archived", label: "Archived", icon: Archive },
+    { key: "settings", label: "Settings", icon: Settings },
+  ];
+
+  const openConversation = view === "chats" && Boolean(selectedChat) && !mobileListOpen;
+
   return (
-    <div className="flex h-[100dvh] overflow-hidden bg-gray-100 text-gray-900">
-      <aside
-        className={`${
-          mobileListOpen ? "flex" : "hidden"
-        } w-full flex-col border-r border-gray-200 bg-white md:flex md:w-[340px] md:shrink-0`}
-      >
-        <header className="flex items-center justify-between border-b border-gray-100 px-4 py-4">
-          <div>
-            <h1 className="text-xl font-bold text-green-700">
-              Joy Inbox
-            </h1>
-            <p className="text-xs text-gray-500">
-              WhatsApp Business Inbox
-            </p>
+    <MotionConfig reducedMotion="user">
+      <div className="app-shell">
+        <aside className={`side-rail ${mobileListOpen ? "" : "mobile-hidden"}`} aria-label="Main navigation">
+          <div className="rail-brand" aria-label="JOY INBOX">
+            <MessageCircle size={23} strokeWidth={2.2} />
           </div>
-
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="rounded-xl p-2 text-gray-500 hover:bg-gray-100"
-            aria-label="Logout"
-            title="Logout"
-          >
-            <LogOut size={19} />
-          </button>
-        </header>
-
-        <div className="border-b border-gray-100 p-3">
-          <div className="flex items-center gap-2 rounded-xl bg-gray-100 px-3">
-            <Search size={17} className="text-gray-500" />
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search chats..."
-              className="w-full bg-transparent py-3 text-sm outline-none"
-            />
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto">
-          {loadingChats ? (
-            <div className="flex justify-center py-10">
-              <Loader2 className="animate-spin text-green-600" />
-            </div>
-          ) : filteredChats.length === 0 ? (
-            <div className="px-6 py-12 text-center">
-              <MessageCircle
-                size={34}
-                className="mx-auto mb-3 text-gray-300"
-              />
-              <p className="text-sm font-medium text-gray-600">
-                No chats found
-              </p>
-              <p className="mt-1 text-xs text-gray-400">
-                Incoming WhatsApp messages will appear here.
-              </p>
-            </div>
-          ) : (
-            filteredChats.map((chat) => (
+          <nav className="rail-nav">
+            {navItems.map(({ key, label, icon: Icon }) => (
               <button
                 type="button"
-                key={chat.id}
+                key={key}
+                className={`rail-button ${view === key ? "active" : ""}`}
+                disabled={deletingChats}
                 onClick={() => {
-                  setSelectedChat(chat);
-                  setMobileListOpen(false);
+                  setView(key);
+                  setSearch("");
+                  setSelectedChatIds(new Set());
+                  setDeleteError("");
+                  setMobileListOpen(true);
                   setError("");
                 }}
-                className={`flex w-full items-center gap-3 border-b border-gray-100 px-4 py-4 text-left transition hover:bg-green-50 ${
-                  selectedChat?.id === chat.id
-                    ? "bg-green-50"
-                    : "bg-white"
-                }`}
+                aria-label={label}
+                aria-current={view === key ? "page" : undefined}
+                title={label}
               >
-                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-green-100 font-semibold text-green-800">
-                  {(chat.customerName || chat.customerPhone || "?")
-                    .charAt(0)
-                    .toUpperCase()}
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-sm font-semibold">
-                      {chat.customerName || chat.customerPhone}
-                    </p>
-                    <span className="shrink-0 text-[10px] text-gray-400">
-                      {formatTime(chat.lastMessageAt)}
-                    </span>
-                  </div>
-
-                  <p className="mt-1 truncate text-xs text-gray-500">
-                    {chat.lastMessage || chat.customerPhone}
-                  </p>
-                </div>
-              </button>
-            ))
-          )}
-        </div>
-
-        <footer className="border-t border-gray-100 px-4 py-3">
-          <p className="truncate text-xs text-gray-500">
-            Signed in: {user?.email || "Owner"}
-          </p>
-        </footer>
-      </aside>
-
-      <main
-        className={`${
-          mobileListOpen ? "hidden" : "flex"
-        } min-w-0 flex-1 flex-col bg-[#efeae2] md:flex`}
-      >
-        {selectedChat ? (
-          <>
-            <header className="flex items-center gap-3 border-b border-gray-200 bg-white px-3 py-3 md:px-5">
-              <button
-                type="button"
-                onClick={() => setMobileListOpen(true)}
-                className="rounded-lg p-2 text-gray-600 hover:bg-gray-100 md:hidden"
-                aria-label="Back to chats"
-              >
-                <Menu size={20} />
-              </button>
-
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-green-100 font-semibold text-green-800">
-                {(selectedChat.customerName ||
-                  selectedChat.customerPhone ||
-                  "?")
-                  .charAt(0)
-                  .toUpperCase()}
-              </div>
-
-              <div className="min-w-0">
-                <p className="truncate text-sm font-semibold">
-                  {selectedChat.customerName ||
-                    selectedChat.customerPhone}
-                </p>
-                <p className="truncate text-xs text-gray-500">
-                  {selectedChat.customerPhone}
-                </p>
-              </div>
-            </header>
-
-            <section className="flex-1 space-y-3 overflow-y-auto px-3 py-5 md:px-8">
-              {loadingMessages ? (
-                <div className="flex justify-center py-10">
-                  <Loader2 className="animate-spin text-green-700" />
-                </div>
-              ) : messages.length === 0 ? (
-                <div className="mt-12 text-center text-sm text-gray-500">
-                  No messages in this conversation yet.
-                </div>
-              ) : (
-                messages.map((item) => {
-                  const outgoing =
-                    item.direction === "outgoing";
-
-                  return (
-                    <div
-                      key={item.id || item.messageId}
-                      className={`flex ${
-                        outgoing ? "justify-end" : "justify-start"
-                      }`}
-                    >
-                      <div
-                        className={`max-w-[85%] rounded-2xl px-3 py-2 shadow-sm md:max-w-[70%] ${
-                          outgoing
-                            ? "rounded-br-sm bg-[#d9fdd3]"
-                            : "rounded-bl-sm bg-white"
-                        }`}
-                      >
-                        <p className="whitespace-pre-wrap break-words text-sm">
-                          {getMessageText(item)}
-                        </p>
-                        <div className="mt-1 flex items-center justify-end gap-1">
-                          <span className="text-[10px] text-gray-500">
-                            {formatTime(item.timestamp)}
-                          </span>
-                          {outgoing && (
-                            <span className="text-[10px] text-gray-500">
-                              {item.status || "sent"}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </section>
-
-            {error && (
-              <p className="bg-red-50 px-4 py-2 text-center text-xs text-red-600">
-                {error}
-              </p>
-            )}
-
-            <form
-              onSubmit={handleSend}
-              className="relative flex items-end gap-2 border-t border-gray-200 bg-white p-3 md:px-5"
-            >
-              {user?.uid && (
-                <QuickReplies
-                  userId={user.uid}
-                  onSelect={insertQuickReply}
-                  slashQuery={slashQuery}
-                  onSlashClose={() => setSlashQuery(null)}
-                />
-              )}
-
-              <textarea
-                value={message}
-                onChange={(event) =>
-                  handleComposerChange(event.target.value)
-                }
-                onKeyDown={(event) => {
-                  if (
-                    event.key === "Enter" &&
-                    !event.shiftKey &&
-                    !event.nativeEvent.isComposing
-                  ) {
-                    event.preventDefault();
-                    event.currentTarget.form?.requestSubmit();
-                  }
-
-                  if (event.key === "Escape") {
-                    setSlashQuery(null);
-                  }
-                }}
-                placeholder="Type a message... (type / for Quick Replies)"
-                rows={1}
-                className="max-h-32 min-h-11 min-w-0 flex-1 resize-y rounded-2xl bg-gray-100 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-green-200"
-              />
-
-              <button
-                type="submit"
-                disabled={sending || !message.trim()}
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-green-600 text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label="Send message"
-              >
-                {sending ? (
-                  <Loader2 size={18} className="animate-spin" />
-                ) : (
-                  <Send size={18} />
+                <Icon size={21} strokeWidth={1.8} />
+                <span>{label}</span>
+                {key === "chats" && chats.some((chat) => chat.unreadCount > 0) && (
+                  <i className="rail-unread" aria-label="Unread chats" />
                 )}
               </button>
-            </form>
-          </>
-        ) : (
-          <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-            <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-white shadow-sm">
-              <MessageCircle size={36} className="text-green-600" />
-            </div>
-            <h2 className="text-lg font-semibold text-gray-700">
-              Welcome to Joy Inbox
-            </h2>
-            <p className="mt-2 max-w-sm text-sm text-gray-500">
-              Select a conversation to view messages and reply to your customers.
-            </p>
-            <button
-              type="button"
-              onClick={() => setMobileListOpen(true)}
-              className="mt-5 rounded-xl bg-green-600 px-4 py-2 text-sm font-semibold text-white md:hidden"
-            >
-              Open Chats
+            ))}
+          </nav>
+          <div className="rail-account">
+            <button type="button" className="rail-button" onClick={handleLogout} aria-label="Sign out" title="Sign out">
+              <LogOut size={20} />
+              <span>Sign out</span>
             </button>
+            <div className="account-avatar" title={user?.email || "Signed in"} aria-label={user?.email || "Signed in"}>
+              {(user?.displayName || user?.email || "U").slice(0, 1).toUpperCase()}
+            </div>
           </div>
-        )}
-      </main>
-    </div>
+        </aside>
+
+        <section className={`list-panel ${openConversation ? "mobile-hidden" : ""}`}>
+          <header className="list-header">
+            <div>
+              <p className="eyebrow">Made by Dhananjoy</p>
+              <h1>
+                {view === "chats" ? "Chats" : view === "contacts" ? "Contacts" : view === "archived" ? "Archived chats" : view === "replies" ? "Quick replies" : "Settings"}
+              </h1>
+            </div>
+            <span className={`connection-indicator ${listError ? "offline" : ""}`} title="Conversation updates use a Firestore listener">
+              <i /> {listError ? "Offline" : loadingChats ? "Connecting" : "Live updates"}
+            </span>
+          </header>
+
+          {selectedChatIds.size > 0 && (
+            <div className="chat-selection-toolbar" aria-live="polite">
+              <span>{deletingChats ? `Deleting ${selectedChatIds.size}…` : `${selectedChatIds.size} selected`}</span>
+              <div>
+                <button
+                  type="button"
+                  className="delete-selected-button"
+                  onClick={() => void deleteSelectedChats()}
+                  disabled={deletingChats}
+                >
+                  {deletingChats ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+                  Delete
+                </button>
+                <button
+                  type="button"
+                  className="cancel-selection-button"
+                  onClick={() => {
+                    setSelectedChatIds(new Set());
+                    setDeleteError("");
+                  }}
+                  disabled={deletingChats}
+                >
+                  Cancel
+                </button>
+              </div>
+              {deleteError && <p role="alert">{deleteError}</p>}
+            </div>
+          )}
+
+          {(view === "chats" || view === "contacts" || view === "archived") && (
+            <>
+              <label className="search-field">
+                <Search size={17} aria-hidden="true" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder={view === "contacts" ? "Search contacts" : "Search chats"}
+                  aria-label={view === "contacts" ? "Search contacts by name or number" : "Search chats"}
+                />
+              </label>
+
+              {view === "chats" && (
+                <div className="filter-tabs" role="group" aria-label="Filter chats">
+                  {(["all", "unread", "pinned"] as ChatFilter[]).map((item) => (
+                    <button
+                      type="button"
+                      key={item}
+                      className={filter === item ? "selected" : ""}
+                      onClick={() => setFilter(item)}
+                      aria-pressed={filter === item}
+                    >
+                      {item === "all" ? "All" : item === "unread" ? "Unread" : "Pinned"}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          <div className="conversation-list" aria-live="polite">
+            {loadingChats ? (
+              <div className="center-state"><Loader2 className="spin" size={22} />Loading conversations…</div>
+            ) : listError ? (
+              <div className="empty-state">
+                <p>{listError}</p>
+                <button type="button" className="text-button" onClick={() => window.location.reload()}>Reload inbox</button>
+              </div>
+            ) : view === "replies" ? (
+              <div className="replies-page">
+                <p>Save approved responses for quick insertion. Selecting a reply prepares a draft; it never sends automatically.</p>
+                {user?.uid && (
+                  <QuickReplies
+                    userId={user.uid}
+                    managementMode
+                    onSelect={insertQuickReply}
+                    slashQuery={null}
+                    registerSlashKeyHandler={registerSlashKeyHandler}
+                    onSlashActiveIndexChange={setSlashActiveIndex}
+                  />
+                )}
+              </div>
+            ) : view === "contacts" && user?.uid ? (
+              <ContactsPanel
+                userId={user.uid}
+                search={search}
+                chats={chats}
+                onOpenChat={(chat) => void selectChat(chat)}
+              />
+            ) : view === "settings" ? (
+              <div className="settings-list">
+                <p className="settings-section-title">Appearance</p>
+                <label className="setting-select">
+                  <span><Sun size={17} /> Theme</span>
+                  <select value={theme} onChange={(event) => setTheme(event.target.value as Theme)}>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                    <option value="system">System default</option>
+                  </select>
+                </label>
+                <p className="settings-section-title">Notifications</p>
+                <div className="setting-row">
+                  <span><Bell size={17} /> Push notifications</span>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => {
+                      if (notificationsEnabled) void turnOffNotifications();
+                      else void enableNotifications();
+                    }}
+                    disabled={notificationsBusy}
+                  >
+                    {notificationsBusy
+                      ? "Please wait…"
+                      : notificationsEnabled
+                        ? "Disable"
+                        : "Enable"}
+                  </button>
+                </div>
+                <p className="helper-text">Enable push notifications to receive new incoming WhatsApp text messages while Joy Inbox is in the background. Browser and Android notification settings control sound.</p>
+                {notificationError && <p className="contacts-error" role="alert">{notificationError}</p>}
+                <p className="settings-section-title">Connection</p>
+                <button type="button" className="connection-check-button" onClick={checkConnection} disabled={checkingConnection}>
+                  {checkingConnection ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                  {checkingConnection ? "Checking…" : "Check connections"}
+                </button>
+                {connectionError && <p className="contacts-error" role="alert">{connectionError}</p>}
+                {connectionStatus && (
+                  <>
+                    <div className="diagnostic-row">
+                      <span className="diagnostic-title">{connectionStatus.whatsapp.connected ? <CircleCheck size={17} /> : <CircleX size={17} />} WhatsApp Cloud API</span>
+                      <strong>{connectionStatus.whatsapp.connected ? "Connected" : "Unavailable"}</strong>
+                      {connectionStatus.whatsapp.phoneNumber && <small>{connectionStatus.whatsapp.phoneNumber}{connectionStatus.whatsapp.verifiedName ? ` · ${connectionStatus.whatsapp.verifiedName}` : ""}</small>}
+                      {connectionStatus.whatsapp.error && <small className="diagnostic-error">Error {connectionStatus.whatsapp.error.code}: {connectionStatus.whatsapp.error.message}</small>}
+                    </div>
+                    <div className="diagnostic-row">
+                      <span className="diagnostic-title">{connectionStatus.firestore.connected ? <CircleCheck size={17} /> : <CircleX size={17} />} Firestore</span>
+                      <strong>{connectionStatus.firestore.connected ? "Connected" : "Unavailable"}</strong>
+                      {connectionStatus.firestore.error && <small className="diagnostic-error">{connectionStatus.firestore.error}</small>}
+                    </div>
+                    <div className="diagnostic-row">
+                      <span className="diagnostic-title">{connectionStatus.mediaStorage.configured ? <CircleCheck size={17} /> : <CircleX size={17} />} Media storage</span>
+                      <strong>{connectionStatus.mediaStorage.configured ? "Configured" : "Not configured"}</strong>
+                    </div>
+                    <p className="helper-text">Checked {new Date(connectionStatus.checkedAt).toLocaleString()}. These are live backend checks. Credentials stay on the server.</p>
+                  </>
+                )}
+                {!connectionStatus && !connectionError && <p className="helper-text">Run a live backend check to view the WhatsApp API, Firestore, and media-storage configuration status.</p>}
+                <p className="settings-section-title">Greeting message</p>
+                {greetingLoading ? (
+                  <div className="center-state"><Loader2 className="spin" size={18} />Loading greeting settings…</div>
+                ) : (
+                  <>
+                    <label className="setting-row greeting-toggle">
+                      <span>Send a greeting on first inbound message</span>
+                      <input
+                        type="checkbox"
+                        checked={greetingEnabled}
+                        onChange={(event) => {
+                          setGreetingEnabled(event.target.checked);
+                          setGreetingSaved(false);
+                        }}
+                        aria-label="Enable greeting message"
+                      />
+                    </label>
+                    <textarea
+                      className="greeting-editor"
+                      value={greetingText}
+                      onChange={(event) => {
+                        setGreetingText(event.target.value);
+                        setGreetingSaved(false);
+                      }}
+                      maxLength={1024}
+                      rows={4}
+                      placeholder="Write a short welcome message…"
+                      aria-label="Greeting message text"
+                    />
+                    <p className="helper-text">Sent only once per conversation after an inbound message opens the 24-hour customer-service window. Approved templates are not used; no greeting is sent outside that window.</p>
+                    <div className="greeting-preview">
+                      <strong>Preview</strong>
+                      <p>{greetingText.trim() || "Your greeting preview will appear here."}</p>
+                    </div>
+                    {greetingError && <p className="contacts-error" role="alert">{greetingError}</p>}
+                    {greetingSaved && <p className="settings-saved" role="status">Greeting settings saved.</p>}
+                    <button
+                      type="button"
+                      className="contact-save-button"
+                      disabled={greetingSaving || greetingLoading || (greetingEnabled && !greetingText.trim())}
+                      onClick={saveGreeting}
+                    >
+                      {greetingSaving ? <Loader2 className="spin" size={16} /> : null}
+                      {greetingSaving ? "Saving…" : "Save greeting"}
+                    </button>
+                  </>
+                )}
+                <button type="button" className="signout-button" onClick={handleLogout}><LogOut size={17} /> Sign out</button>
+              </div>
+            ) : visibleChats.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">{view === "contacts" ? <UsersRound size={25} /> : <MessageCircle size={25} />}</div>
+                <h2>{view === "contacts" ? "No contacts found" : view === "archived" ? "No archived chats" : "No conversations yet"}</h2>
+                <p>{view === "contacts" ? "Contacts appear here when customers message your business." : view === "archived" ? "Archived conversations will appear here." : "New customer messages will appear here when delivered to your webhook."}</p>
+              </div>
+            ) : (
+              <>
+                {visibleChats.map((chat) => (
+                  <button
+                    type="button"
+                    className={`chat-row ${selectedChat?.id === chat.id && view === "chats" ? "current" : ""} ${selectedChatIds.has(chat.id) ? "selected" : ""}`}
+                    key={chat.id}
+                    onPointerDown={(event) => startChatLongPress(chat.id, event)}
+                    onPointerMove={moveChatLongPress}
+                    onPointerUp={cancelChatLongPress}
+                    onPointerCancel={cancelChatLongPress}
+                    onPointerLeave={cancelChatLongPress}
+                    onContextMenu={(event) => event.preventDefault()}
+                    onClick={() => handleChatRowClick(chat)}
+                    aria-pressed={selectedChatIds.has(chat.id)}
+                  >
+                    <span className={`avatar ${selectedChatIds.has(chat.id) ? "selected-avatar" : ""}`}>
+                      {selectedChatIds.has(chat.id)
+                        ? <Check size={20} aria-hidden="true" />
+                        : initials(chat.customerName, chat.customerPhone)}
+                    </span>
+                    <span className="chat-row-copy">
+                      <span className="chat-row-top">
+                        <strong>{displayName(chat)}</strong>
+                        <time>{formatTime(chat.lastMessageAt)}</time>
+                      </span>
+                      <span className="chat-row-bottom">
+                        <span className="preview">{view === "contacts" ? chat.customerPhone : chat.lastMessage || chat.customerPhone}</span>
+                        <span className="row-indicators">
+                          {chat.pinned && <Pin size={13} aria-label="Pinned" />}
+                          {chat.unreadCount > 0 && <span className="unread-badge">{chat.unreadCount}</span>}
+                        </span>
+                      </span>
+                    </span>
+                  </button>
+                ))}
+                {hasOlderChats && view !== "contacts" && (
+                  <button type="button" className="load-older-button" onClick={loadEarlierChats} disabled={loadingOlderChats}>
+                    {loadingOlderChats ? <Loader2 className="spin" size={15} /> : null}
+                    {loadingOlderChats ? "Loading older conversations…" : "Load older conversations"}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+          <footer className="list-footer">
+            <span className="account-avatar small">{(user?.displayName || user?.email || "U").slice(0, 1).toUpperCase()}</span>
+            <span className="signed-in-copy">{user?.displayName || user?.email || "Signed in"}</span>
+            <button type="button" className="icon-button footer-settings" onClick={() => setView("settings")} aria-label="Settings"><Settings size={18} /></button>
+          </footer>
+        </section>
+
+        <main ref={conversationPanelRef} className={`conversation-panel ${mobileListOpen ? "mobile-hidden" : ""}`}>
+          {view === "settings" ? (
+            <section className="welcome-panel">
+              <div className="welcome-card">
+                <div className="welcome-icon"><Settings size={27} /></div>
+                <h2>Settings</h2>
+                <p>Choose your preferred appearance and push notification settings from the settings panel.</p>
+              </div>
+            </section>
+          ) : view === "replies" ? (
+            <section className="welcome-panel">
+              <div className="welcome-card">
+                <div className="welcome-icon"><MessageSquareText size={27} /></div>
+                <h2>Quick replies</h2>
+                <p>Create and organize saved text responses. Choose a conversation to prepare a reply draft.</p>
+              </div>
+            </section>
+          ) : selectedChat && view === "chats" ? (
+            <>
+              <header className="conversation-header">
+                <button type="button" className="icon-button back-button" onClick={() => setMobileListOpen(true)} aria-label="Back to conversations">
+                  <ArrowLeft size={20} />
+                </button>
+                <span className="avatar">{initials(selectedChat.customerName, selectedChat.customerPhone)}</span>
+                <div className="contact-heading">
+                  <h2>{displayName(selectedChat)}</h2>
+                  <a href={`tel:+${selectedChat.customerPhone}`} aria-label={`Call ${selectedChat.customerPhone}`}>{selectedChat.customerPhone}</a>
+                </div>
+                <div className="header-actions">
+                  <label className="conversation-search">
+                    <Search size={16} />
+                    <input
+                      type="search"
+                      value={messageSearch}
+                      onChange={(event) => setMessageSearch(event.target.value)}
+                      placeholder="Search messages"
+                      aria-label="Search messages in this conversation"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className={`pinned-filter-button ${showPinnedMessages ? "active" : ""}`}
+                    onClick={() => {
+                      setShowPinnedMessages((current) => !current);
+                      setSelectedMessageIds(new Set());
+                    }}
+                    aria-pressed={showPinnedMessages}
+                    title={showPinnedMessages ? "Show all messages" : "Show pinned messages"}
+                  >
+                    <Pin size={16} />
+                    <span>{showPinnedMessages ? "All" : `Pinned${pinnedMessages.length ? ` (${pinnedMessages.length})` : ""}`}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-button ${selectedChat.pinned ? "action-active" : ""}`}
+                    onClick={() => updateChat(selectedChat, { pinned: !selectedChat.pinned })}
+                    disabled={busyAction}
+                    aria-label={selectedChat.pinned ? "Unpin conversation" : "Pin conversation"}
+                    title={selectedChat.pinned ? "Unpin conversation" : "Pin conversation"}
+                  ><Pin size={18} /></button>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={() => updateChat(selectedChat, { archived: !selectedChat.archived })}
+                    disabled={busyAction}
+                    aria-label={selectedChat.archived ? "Restore conversation" : "Archive conversation"}
+                    title={selectedChat.archived ? "Restore conversation" : "Archive conversation"}
+                  >{selectedChat.archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}</button>
+                </div>
+              </header>
+
+              <section className="message-history" aria-label={`Messages with ${displayName(selectedChat)}`}>
+                {selectedMessageIds.size > 0 && (
+                  <motion.div
+                    className="message-selection-toolbar"
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.16 }}
+                  >
+                    <strong>{selectedMessageIds.size} selected</strong>
+                    <button
+                      type="button"
+                      onClick={() => beginForward([...selectedMessageIds])}
+                      disabled={deletingMessages || forwardingMessages || [...selectedMessageIds].some((id) => {
+                        const selected = findMessageById(id);
+                        return !selected || selected.type !== "text" || !selected.text?.trim();
+                      })}
+                    ><Forward size={16} />Forward</button>
+                    <button
+                      type="button"
+                      onClick={() => void deleteMessagesFromInbox([...selectedMessageIds], true)}
+                      disabled={deletingMessages || forwardingMessages}
+                    >{deletingMessages ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}Delete</button>
+                    <button type="button" className="selection-cancel" onClick={cancelMessageSelection} aria-label="Cancel message selection">
+                      <X size={18} />
+                    </button>
+                  </motion.div>
+                )}
+                {(selectedChat.greetingStatus === "failed" || selectedChat.greetingStatus === "outside_service_window") && (
+                  <p className="greeting-warning" role="status">
+                    Greeting was not sent: {selectedChat.greetingLastError || "check the greeting settings and WhatsApp connection."}
+                  </p>
+                )}
+                {hasOlderMessages && (
+                  <button type="button" className="load-older-button" onClick={loadEarlierMessages} disabled={loadingOlderMessages}>
+                    {loadingOlderMessages ? <Loader2 className="spin" size={15} /> : null}
+                    {loadingOlderMessages ? "Loading earlier messages…" : "Load earlier messages"}
+                  </button>
+                )}
+                {loadingMessages ? (
+                  <div className="center-state"><Loader2 className="spin" size={22} />Loading messages…</div>
+                ) : visibleMessages.length === 0 ? (
+                  <div className="empty-state message-empty">
+                    <div className="empty-icon"><MessageCircle size={25} /></div>
+                    <h2>{messageSearch ? "No matching messages" : showPinnedMessages ? "No pinned messages" : "Start the conversation"}</h2>
+                    <p>{messageSearch ? "Try another search phrase." : showPinnedMessages ? "Pin a message to keep it easy to find here." : "Messages from this customer will appear here."}</p>
+                  </div>
+                ) : (
+                  visibleMessages.map((item) => {
+                    const outgoing = item.direction === "outgoing";
+                    const itemId = getMessageDocumentId(item);
+                    const isSelected = selectedMessageIds.has(itemId);
+                    const repliedMessage = item.replyToMessageId
+                      ? messages.find((messageItem) => getMessageDocumentId(messageItem) === item.replyToMessageId)
+                      : null;
+                    return (
+                      <motion.div
+                        key={itemId}
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.16 }}
+                        className={`message-line ${outgoing ? "outgoing" : "incoming"} ${isSelected ? "message-selected" : ""}`}
+                        onPointerDown={(event) => startMessageLongPress(item, event)}
+                        onPointerMove={moveMessageLongPress}
+                        onPointerUp={cancelMessageLongPress}
+                        onPointerCancel={cancelMessageLongPress}
+                        onPointerLeave={cancelMessageLongPress}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          openMessageActionMenu(item, event.clientX, event.clientY);
+                        }}
+                        onClick={(event) => {
+                          if (event.target instanceof Element && event.target.closest("button, a, video, audio")) return;
+                          handleMessageClick(item);
+                        }}
+                      >
+                        <article
+                          className={`message-bubble ${outgoing ? "sent" : "received"} ${isSelected ? "selected" : ""}`}
+                          tabIndex={0}
+                          role="group"
+                          aria-label={`${outgoing ? "Sent" : "Received"} message${isSelected ? ", selected" : ""}`}
+                          onKeyDown={(event) => {
+                            if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                              event.preventDefault();
+                              const bounds = event.currentTarget.getBoundingClientRect();
+                              openMessageActionMenu(item, bounds.left + bounds.width / 2, bounds.bottom);
+                            }
+                          }}
+                        >
+                          {repliedMessage && (
+                            <div className="message-quote">
+                              <strong>{repliedMessage.direction === "outgoing" ? "You" : displayName(selectedChat)}</strong>
+                              <span>{repliedMessage.text || `${repliedMessage.type} message`}</span>
+                            </div>
+                          )}
+                          {item.pinned && <span className="message-pinned-indicator"><Pin size={12} />Pinned</span>}
+                          {item.mediaStoragePath || item.mediaId ? (
+                            <MessageMedia chatId={selectedChat.id} message={item} />
+                          ) : item.type !== "text" ? (
+                            <p className="media-unavailable">{item.mediaDownloadError || `${item.type} attachment is unavailable.`}</p>
+                          ) : null}
+                          <p>{item.text || "This message type is not available in this inbox yet."}</p>
+                          <div className="message-meta">
+                            <time>{formatTime(item.timestamp)}</time>
+                            {outgoing && statusLabel(item.status) && (
+                              <span className={item.status === "failed" ? "failed-status" : ""}>
+                                {item.status === "read" || item.status === "delivered" ? <CheckCheck size={14} /> : null}
+                                {statusLabel(item.status)}
+                              </span>
+                            )}
+                          </div>
+                        </article>
+                      </motion.div>
+                    );
+                  })
+                )}
+              </section>
+
+              {error && <div className="inline-error" role="alert">{error}</div>}
+              <form className="composer" onSubmit={handleSend}>
+                {replyTo && (
+                  <div className="reply-composer-banner">
+                    <Reply size={16} />
+                    <span><strong>Replying to {replyTo.direction === "outgoing" ? "your message" : displayName(selectedChat)}</strong>{replyTo.text || `${replyTo.type} message`}</span>
+                    <button type="button" onClick={() => setReplyTo(null)} aria-label="Cancel reply"><X size={17} /></button>
+                  </div>
+                )}
+                {user?.uid && (
+                  <QuickReplies
+                    userId={user.uid}
+                    draftMessage={message}
+                    onSelect={insertQuickReply}
+                    slashQuery={slashQuery}
+                    onSlashClose={() => setSlashQuery(null)}
+                    registerSlashKeyHandler={registerSlashKeyHandler}
+                    onSlashActiveIndexChange={setSlashActiveIndex}
+                  />
+                )}
+                <input
+                  ref={fileInput}
+                  className="visually-hidden"
+                  type="file"
+                  accept="image/jpeg,image/png,video/mp4,video/3gpp,audio/aac,audio/amr,audio/mpeg,audio/mp4,audio/ogg,application/pdf,text/plain,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                  aria-label="Choose image, video, audio, or document"
+                  onChange={(event) => chooseAttachment(event.target.files?.[0])}
+                />
+                <textarea
+                  ref={composerInputRef}
+                  value={message}
+                  onChange={(event) => handleComposerChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      slashQuery !== null &&
+                      !event.shiftKey &&
+                      slashKeyHandler.current?.(event.key)
+                    ) {
+                      event.preventDefault();
+                      return;
+                    }
+                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                    if (event.key === "Escape") setSlashQuery(null);
+                  }}
+                  placeholder="Message"
+                  aria-label="Message"
+                  aria-haspopup={slashQuery !== null ? "listbox" : undefined}
+                  aria-controls={slashQuery !== null ? "quick-reply-listbox" : undefined}
+                  aria-activedescendant={slashQuery !== null ? `quick-reply-option-${slashActiveIndex}` : undefined}
+                  rows={1}
+                  maxLength={4096}
+                  disabled={sending && Boolean(attachment)}
+                />
+                <button
+                  type="button"
+                  className="attachment-button"
+                  onClick={() => fileInput.current?.click()}
+                  disabled={sending}
+                  aria-label="Attach media or document"
+                >
+                  <Paperclip size={19} />
+                </button>
+                <motion.button
+                  type="submit"
+                  className="send-button"
+                  disabled={sending || (!message.trim() && !attachment)}
+                  aria-label="Send message"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.9 }}
+                  transition={{ type: "spring", stiffness: 420, damping: 17 }}
+                >
+                  {sending ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+                </motion.button>
+              </form>
+              {(attachment || sending) && (
+                <div className="attachment-status" aria-live="polite">
+                  {attachment && <span>{attachment.name} · {(attachment.size / 1024 / 1024).toFixed(1)} MB</span>}
+                  {sending && attachment && <span>Uploading {uploadProgress}%</span>}
+                  {attachment && !sending && (
+                    <button type="button" className="icon-button" onClick={() => setAttachment(null)} aria-label="Remove attachment"><Trash2 size={16} /></button>
+                  )}
+                  {sending && attachment && (
+                    <button type="button" className="text-button" onClick={cancelUpload}>Cancel upload</button>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <section className="welcome-panel">
+              <div className="welcome-card">
+                <div className="welcome-icon"><MessageCircle size={27} /></div>
+                <h2>Welcome to JOY INBOX</h2>
+                <p>Select a conversation to read customer messages and reply through your connected WhatsApp Business account.</p>
+                {error && <p className="welcome-error" role="alert">{error}</p>}
+                <div className="welcome-details">
+                  <span><UsersRound size={16} /> {chats.filter((chat) => !chat.archived).length} conversations</span>
+                  <span><Bell size={16} /> Incoming messages sync live</span>
+                </div>
+              </div>
+            </section>
+          )}
+        </main>
+      </div>
+      {messageActionMenu && (
+        <motion.div
+          className="message-action-backdrop"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onClick={() => setMessageActionMenu(null)}
+        >
+          <motion.div
+            className="message-action-menu"
+            role="menu"
+            aria-label="Message actions"
+            style={{ left: messageActionMenu.x, top: messageActionMenu.y }}
+            initial={{ opacity: 0, scale: 0.96, y: 5 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            transition={{ duration: 0.14 }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {(() => {
+              const item = messageActionMenu.message;
+              const id = getMessageDocumentId(item);
+              const isSelected = selectedMessageIds.has(id);
+              const canForward = item.type === "text" && Boolean(item.text?.trim());
+              return (
+                <>
+                  <button type="button" role="menuitem" onClick={() => {
+                    toggleMessageSelection(item);
+                    setMessageActionMenu(null);
+                  }}>
+                    {isSelected ? <X size={17} /> : <Check size={17} />}
+                    {isSelected ? "Deselect message" : "Select message"}
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => beginReply(item)}>
+                    <Reply size={17} />Reply
+                  </button>
+                  <button type="button" role="menuitem" disabled={!item.text?.trim()} onClick={() => {
+                    setMessageActionMenu(null);
+                    void navigator.clipboard.writeText(item.text).catch((copyError: unknown) => {
+                      console.error("Message copy failed:", copyError);
+                      setError("Message text could not be copied.");
+                    });
+                  }}>
+                    <Copy size={17} />Copy text
+                  </button>
+                  <button type="button" role="menuitem" disabled={!canForward || forwardingMessages} onClick={() => beginForward([id])}>
+                    <Forward size={17} />Forward
+                  </button>
+                  <button type="button" role="menuitem" disabled={busyAction} onClick={() => void setMessagePinned(item)}>
+                    <Pin size={17} />{item.pinned ? "Unpin message" : "Pin message"}
+                  </button>
+                  {item.direction === "outgoing" && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled
+                      title="Message editing is not supported by the WhatsApp Cloud API."
+                    ><Pencil size={17} />Edit message</button>
+                  )}
+                  <button type="button" role="menuitem" disabled={deletingMessages} onClick={() => void deleteMessagesFromInbox([id], true)}>
+                    <Trash2 size={17} />Delete for me
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled
+                    title="Deleting a sent message for everyone is not supported by the WhatsApp Cloud API."
+                  >
+                    <Trash2 size={17} />Delete for everyone
+                  </button>
+                  <p className="message-action-note">
+                    Edit and delete-for-everyone are unavailable because the documented WhatsApp Cloud API does not expose those operations.
+                  </p>
+                </>
+              );
+            })()}
+          </motion.div>
+        </motion.div>
+      )}
+      {forwardMessageIds && (
+        <div className="contact-modal-backdrop" onClick={() => !forwardingMessages && setForwardMessageIds(null)}>
+          <section
+            className="contact-modal message-forward-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="message-forward-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header>
+              <h2 id="message-forward-title">Forward text messages</h2>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close forward dialog"
+                disabled={forwardingMessages}
+                onClick={() => setForwardMessageIds(null)}
+              ><X size={18} /></button>
+            </header>
+            <p className="helper-text">
+              Selected text will be sent as new messages. WhatsApp Cloud API does not forward media or mark these as forwarded.
+            </p>
+            <div className="message-forward-destinations">
+              {chats.filter((chat) => !chat.archived).map((chat) => (
+                <button
+                  type="button"
+                  key={chat.id}
+                  disabled={forwardingMessages}
+                  onClick={() => void forwardMessagesToChat(chat)}
+                >
+                  <span className="avatar">{initials(chat.customerName, chat.customerPhone)}</span>
+                  <span>{displayName(chat)}</span>
+                  {forwardingMessages && <Loader2 className="spin" size={16} />}
+                </button>
+              ))}
+              {chats.every((chat) => chat.archived) && <p>No active conversations are available.</p>}
+            </div>
+            {error && <p className="contacts-error" role="alert">{error}</p>}
+          </section>
+        </div>
+      )}
+    </MotionConfig>
   );
 }

@@ -1,0 +1,9 @@
+{
+  "name": "JOY INBOX",
+  "short_name": "JOY INBOX",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef2f3",
+  "theme_color": "#075e54"
+}

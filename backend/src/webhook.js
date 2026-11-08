@@ -1,7 +1,10 @@
 
 const { getDb } = require("./firebase");
 const { verifyMetaSignature, getRawBody } = require("./security");
-const { normalizePhoneNumber } = require("./whatsapp");
+const { normalizePhoneNumber, sendWhatsAppText } = require("./whatsapp");
+const { downloadWhatsAppMedia } = require("./media");
+const { OWNER_UID } = require("./owner");
+const { sendIncomingTextNotification } = require("./push");
 
 function getVerifyToken() {
   return (
@@ -20,6 +23,21 @@ function getQueryParameters(event) {
   );
 
   return Object.fromEntries(params.entries());
+}
+
+function shouldSuppressInbound(deletionSnapshot, timestamp) {
+  if (!deletionSnapshot.exists) return false;
+  const deletion = deletionSnapshot.data() || {};
+  if (deletion.deleting === true) return true;
+
+  const deletedAtValue = deletion.deletedAt;
+  if (!deletedAtValue) return false;
+  const deletedAt = deletedAtValue?.toDate
+    ? deletedAtValue.toDate()
+    : deletedAtValue instanceof Date
+      ? deletedAtValue
+      : new Date(deletedAtValue);
+  return !Number.isNaN(deletedAt.getTime()) && timestamp.getTime() <= deletedAt.getTime();
 }
 
 async function verifyWebhook(event) {
@@ -58,15 +76,45 @@ async function saveIncomingMessage(message, contactName) {
   const messageId = message.id;
 
   if (!phone || !messageId) {
-    return;
+    return false;
   }
 
-  // This version stores text messages only.
-  if (message.type !== "text" || !message.text?.body) {
-    return;
-  }
+  const timestamp = message.timestamp
+    ? new Date(Number(message.timestamp) * 1000)
+    : new Date();
+  const deletedChatRef = db.collection("deletedChats").doc(phone);
+  const deletionSnapshot = await deletedChatRef.get();
+  if (shouldSuppressInbound(deletionSnapshot, timestamp)) return false;
 
-  const text = message.text.body;
+  const mediaMessage = message[message.type] || {};
+  const text =
+    message.type === "text"
+      ? String(message.text?.body || "")
+      : String(
+          mediaMessage.caption ||
+          mediaMessage.title ||
+          (message.type === "location" && message.location
+            ? `${message.location.latitude}, ${message.location.longitude}`
+            : `${message.type || "Unsupported"} message`)
+        );
+  const mediaId = mediaMessage.id || "";
+  let media = null;
+  let mediaError = "";
+
+  if (mediaId) {
+    try {
+      media = await downloadWhatsAppMedia(
+        mediaId,
+        phone,
+        messageId,
+        mediaMessage.filename
+      );
+    } catch (error) {
+      mediaError =
+        error instanceof Error ? error.message : "Media could not be retrieved.";
+      console.error("Incoming media retrieval failed:", mediaError);
+    }
+  }
 
   const chatRef = db.collection("chats").doc(phone);
 
@@ -74,12 +122,23 @@ async function saveIncomingMessage(message, contactName) {
     .collection("messages")
     .doc(messageId);
 
+  if ((await messageRef.get()).exists) {
+    return false;
+  }
+
+  let created = false;
   await db.runTransaction(async (transaction) => {
+    created = false;
     const existingMessage = await transaction.get(messageRef);
 
     if (existingMessage.exists) {
       return;
     }
+
+    const currentDeletion = await transaction.get(deletedChatRef);
+    if (shouldSuppressInbound(currentDeletion, timestamp)) return;
+
+    created = true;
 
     const chatSnapshot = await transaction.get(chatRef);
 
@@ -87,20 +146,23 @@ async function saveIncomingMessage(message, contactName) {
       ? Number(chatSnapshot.data().unreadCount || 0)
       : 0;
 
-    const timestamp = message.timestamp
-      ? new Date(Number(message.timestamp) * 1000)
-      : new Date();
-
     transaction.set(messageRef, {
       messageId,
       chatId: phone,
       direction: "incoming",
-      type: "text",
+      type: String(message.type || "unknown"),
       text,
       timestamp,
       status: "received",
       source: "whatsapp",
-      sender: phone
+      sender: phone,
+      mediaId: media?.mediaId || mediaId || null,
+      mediaStoragePath: media?.storagePath || null,
+      mediaMimeType: media?.mimeType || mediaMessage.mime_type || null,
+      mediaSize: media?.size || Number(mediaMessage.file_size) || null,
+      mediaFilename: String(mediaMessage.filename || "").slice(0, 180) || null,
+      mediaSha256: media?.sha256 || null,
+      mediaDownloadError: mediaError || null
     });
 
     transaction.set(
@@ -123,6 +185,116 @@ async function saveIncomingMessage(message, contactName) {
       { merge: true }
     );
   });
+
+  if (!created) return false;
+
+  try {
+    const contactRef = db
+      .collection("users")
+      .doc(OWNER_UID)
+      .collection("contacts")
+      .doc(phone);
+    await db.runTransaction(async (transaction) => {
+      const contactSnapshot = await transaction.get(contactRef);
+      const contact = {
+        phone: `+${phone}`,
+        phoneId: phone,
+        source: contactSnapshot.exists
+          ? contactSnapshot.data().source || "whatsapp"
+          : "whatsapp",
+        lastSeenAt: new Date(),
+        updatedAt: new Date()
+      };
+      if (!contactSnapshot.exists) {
+        contact.name = contactName || `+${phone}`;
+        contact.email = "";
+        contact.notes = "";
+        contact.createdAt = new Date();
+      }
+      transaction.set(contactRef, contact, { merge: true });
+    });
+  } catch (error) {
+    console.error("WhatsApp contact sync failed:", error);
+  }
+
+  return created;
+}
+
+async function maybeSendGreeting(phone, inboundMessage) {
+  const db = getDb();
+  const settingsSnapshot = await db
+    .collection("users")
+    .doc(OWNER_UID)
+    .collection("settings")
+    .doc("greeting")
+    .get();
+  const settings = settingsSnapshot.exists ? settingsSnapshot.data() : {};
+  const greetingText = String(settings.text || "").trim();
+  if (!settings.enabled || !greetingText || greetingText.length > 1024) return;
+
+  const chatRef = db.collection("chats").doc(phone);
+  const inboundTime = Number(inboundMessage.timestamp)
+    ? new Date(Number(inboundMessage.timestamp) * 1000)
+    : new Date();
+  const isWithinServiceWindow =
+    inboundTime.getTime() <= Date.now() + 5 * 60 * 1000 &&
+    Date.now() - inboundTime.getTime() < 24 * 60 * 60 * 1000;
+
+  const claimed = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(chatRef);
+    if (!snapshot.exists || snapshot.data().greetingAttemptedFor) return false;
+    const deletionSnapshot = await transaction.get(db.collection("deletedChats").doc(phone));
+    if (shouldSuppressInbound(deletionSnapshot, inboundTime)) return false;
+
+    transaction.set(chatRef, {
+      greetingAttemptedFor: inboundMessage.id,
+      greetingStatus: isWithinServiceWindow ? "sending" : "outside_service_window",
+      greetingAttemptedAt: new Date(),
+      greetingLastError: isWithinServiceWindow
+        ? null
+        : "Greeting was not sent: the inbound message is outside the 24-hour service window."
+    }, { merge: true });
+    return true;
+  });
+  if (!claimed || !isWithinServiceWindow) return;
+
+  try {
+    const result = await sendWhatsAppText(phone, greetingText);
+    const timestamp = new Date();
+    await db.runTransaction(async (transaction) => {
+      const currentChat = await transaction.get(chatRef);
+      if (currentChat.data()?.greetingAttemptedFor !== inboundMessage.id) return;
+      const messageRef = chatRef.collection("messages").doc(result.messageId);
+      transaction.set(messageRef, {
+        messageId: result.messageId,
+        chatId: phone,
+        direction: "outgoing",
+        type: "text",
+        text: greetingText,
+        timestamp,
+        status: "sent",
+        source: "greeting",
+        sender: "owner"
+      });
+      transaction.set(chatRef, {
+        greetingStatus: "sent",
+        greetingSentAt: timestamp,
+        greetingLastError: null,
+        lastMessage: greetingText,
+        lastMessageAt: timestamp,
+        lastMessageDirection: "outgoing",
+        updatedAt: timestamp
+      }, { merge: true });
+    });
+  } catch (error) {
+    const message = String(error?.message || "Greeting could not be sent.").slice(0, 300);
+    console.error("Greeting send failed:", message);
+    await chatRef.set({
+      greetingStatus: "failed",
+      greetingLastError: message,
+      greetingFailedAt: new Date()
+    }, { merge: true });
+  }
 }
 
 async function updateMessageStatus(status) {
@@ -172,7 +344,26 @@ async function processWebhookPayload(payload) {
         const contactName =
           contact?.profile?.name || message.from;
 
-        await saveIncomingMessage(message, contactName);
+        const created = await saveIncomingMessage(message, contactName);
+        if (created) {
+          if (message.type === "text") {
+            try {
+              await sendIncomingTextNotification(
+                normalizePhoneNumber(message.from),
+                contactName,
+                message.text?.body,
+                message.id
+              );
+            } catch (error) {
+              console.error("Incoming message push notification failed:", error);
+            }
+          }
+
+          await maybeSendGreeting(
+            normalizePhoneNumber(message.from),
+            message
+          );
+        }
       }
 
       for (const status of value.statuses || []) {

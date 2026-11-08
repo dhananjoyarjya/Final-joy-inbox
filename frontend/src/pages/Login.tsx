@@ -53,7 +53,7 @@ export default function Login() {
           </div>
 
           <h1 className="text-3xl font-bold text-[#075e54]">
-            Joy Inbox
+            JOY INBOX
           </h1>
 
           <p className="mt-2 text-sm text-gray-500">
@@ -129,7 +129,7 @@ export default function Login() {
         </button>
 
         <p className="mt-6 text-center text-xs text-gray-400">
-          Private access · Joy Inbox
+          Private access · JOY INBOX
         </p>
       </section>
     </main>

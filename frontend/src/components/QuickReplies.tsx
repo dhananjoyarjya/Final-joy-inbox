@@ -21,22 +21,30 @@ import type { QuickReply } from "../types";
 
 type Props = {
   userId: string;
+  draftMessage?: string;
+  managementMode?: boolean;
   onSelect: (message: string) => void;
   slashQuery?: string | null;
   onSlashClose?: () => void;
+  registerSlashKeyHandler?: (handler: ((key: string) => boolean) | null) => void;
+  onSlashActiveIndexChange?: (index: number) => void;
 };
 
 export default function QuickReplies({
   userId,
+  draftMessage = "",
+  managementMode = false,
   onSelect,
   slashQuery = null,
   onSlashClose,
+  registerSlashKeyHandler,
+  onSlashActiveIndexChange,
 }: Props) {
   const [replies, setReplies] = useState<QuickReply[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(managementMode);
   const [formOpen, setFormOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -44,6 +52,7 @@ export default function QuickReplies({
   const [title, setTitle] = useState("");
   const [shortcut, setShortcut] = useState("");
   const [message, setMessage] = useState("");
+  const [activeSlashIndex, setActiveSlashIndex] = useState(0);
 
   useEffect(() => {
     if (!userId) {
@@ -99,6 +108,47 @@ export default function QuickReplies({
     });
   }, [replies, slashQuery]);
 
+  useEffect(() => {
+    setActiveSlashIndex(0);
+  }, [slashQuery]);
+
+  useEffect(() => {
+    setActiveSlashIndex((current) =>
+      slashReplies.length ? Math.min(current, slashReplies.length - 1) : 0
+    );
+  }, [slashReplies.length]);
+
+  useEffect(() => {
+    onSlashActiveIndexChange?.(activeSlashIndex);
+  }, [activeSlashIndex, onSlashActiveIndexChange]);
+
+  useEffect(() => {
+    if (slashQuery === null) {
+      registerSlashKeyHandler?.(null);
+      return;
+    }
+
+    const handleSlashKey = (key: string) => {
+      if (key === "ArrowDown" || key === "ArrowUp") {
+        setActiveSlashIndex((current) => {
+          if (slashReplies.length === 0) return 0;
+          const direction = key === "ArrowDown" ? 1 : -1;
+          return (current + direction + slashReplies.length) % slashReplies.length;
+        });
+        return true;
+      }
+      if (key === "Enter") {
+        const reply = slashReplies[activeSlashIndex];
+        if (reply) chooseReply(reply);
+        return true;
+      }
+      return false;
+    };
+
+    registerSlashKeyHandler?.(handleSlashKey);
+    return () => registerSlashKeyHandler?.(null);
+  }, [activeSlashIndex, registerSlashKeyHandler, slashQuery, slashReplies]);
+
   function resetForm() {
     setTitle("");
     setShortcut("");
@@ -107,10 +157,10 @@ export default function QuickReplies({
     setFormOpen(false);
   }
 
-  function startAdd() {
+  function startAdd(initialMessage = "") {
     setTitle("");
     setShortcut("");
-    setMessage("");
+    setMessage(initialMessage);
     setEditingId(null);
     setError("");
     setFormOpen(true);
@@ -188,16 +238,13 @@ export default function QuickReplies({
   }
 
   return (
-    <div className="relative shrink-0">
+    <div className={managementMode ? "relative w-full" : "relative shrink-0"}>
       {slashQuery !== null && (
-        <div className="absolute bottom-full left-0 z-50 mb-3 w-[min(90vw,380px)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
+        <div id="quick-reply-listbox" role="listbox" aria-label="Quick reply suggestions" className="absolute bottom-full left-0 z-50 mb-3 w-[min(90vw,380px)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
           <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
             <div>
               <p className="text-sm font-semibold text-gray-900">
                 Quick Replies
-              </p>
-              <p className="text-xs text-gray-500">
-                Reply select karo; message composer mein aa jayega.
               </p>
             </div>
 
@@ -221,12 +268,15 @@ export default function QuickReplies({
                 Koi matching Quick Reply nahi mili.
               </p>
             ) : (
-              slashReplies.map((reply) => (
+              slashReplies.map((reply, index) => (
                 <button
                   key={reply.id}
+                  id={`quick-reply-option-${index}`}
                   type="button"
+                  role="option"
+                  aria-selected={activeSlashIndex === index}
                   onClick={() => chooseReply(reply)}
-                  className="w-full rounded-xl px-3 py-3 text-left hover:bg-green-50"
+                  className={`w-full rounded-xl px-3 py-3 text-left hover:bg-green-50 ${activeSlashIndex === index ? "quick-reply-active" : ""}`}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm font-semibold text-gray-800">
@@ -250,22 +300,24 @@ export default function QuickReplies({
         </div>
       )}
 
-      <button
-        type="button"
-        onClick={() => {
-          setSearch("");
-          setError("");
-          setFormOpen(false);
-          setPanelOpen((open) => !open);
-        }}
-        className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-      >
-        <MessageSquareText size={17} />
-        Quick Replies
-      </button>
+      {!managementMode && (
+        <button
+          type="button"
+          className="composer-quick-replies"
+          onClick={() => {
+            setSearch("");
+            setError("");
+            setFormOpen(false);
+            setPanelOpen((open) => !open);
+          }}
+          aria-label="Quick replies"
+        >
+          <MessageSquareText size={19} />
+        </button>
+      )}
 
       {panelOpen && (
-        <div className="absolute bottom-full left-0 z-40 mb-3 w-[min(90vw,380px)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
+        <div className={`${managementMode ? "relative mt-3 w-full max-w-xl" : "absolute bottom-full left-0 z-40 mb-3 w-[min(90vw,380px)]"} overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl`}>
           <div className="flex items-center justify-between border-b border-gray-100 p-4">
             <div>
               <h3 className="font-semibold text-gray-900">
@@ -279,21 +331,36 @@ export default function QuickReplies({
             <div className="flex items-center gap-1">
               <button
                 type="button"
-                onClick={startAdd}
+                onClick={() => startAdd()}
                 className="flex items-center gap-1 rounded-lg bg-green-600 px-3 py-2 text-xs font-semibold text-white hover:bg-green-700"
               >
                 <Plus size={15} />
-                Add
+                {managementMode ? "Add quick reply" : "Add"}
               </button>
 
-              <button
-                type="button"
-                onClick={() => setPanelOpen(false)}
-                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
-                aria-label="Close panel"
-              >
-                <X size={17} />
-              </button>
+              {!managementMode && (
+                <button
+                  type="button"
+                  onClick={() => startAdd(draftMessage)}
+                  disabled={!draftMessage.trim()}
+                  title="Save the current message as a Quick Reply"
+                  className="flex items-center gap-1 rounded-lg border border-green-200 px-3 py-2 text-xs font-semibold text-green-700 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <MessageSquareText size={14} />
+                  Save message
+                </button>
+              )}
+
+              {!managementMode && (
+                <button
+                  type="button"
+                  onClick={() => setPanelOpen(false)}
+                  className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                  aria-label="Close panel"
+                >
+                  <X size={17} />
+                </button>
+              )}
             </div>
           </div>
 
@@ -382,7 +449,9 @@ export default function QuickReplies({
               </div>
             ) : filteredReplies.length === 0 ? (
               <p className="px-3 py-6 text-center text-sm text-gray-500">
-                Abhi koi saved reply nahi hai.
+                {managementMode
+                  ? "Abhi koi saved reply nahi hai. Add quick reply par click karke pehli reply banao."
+                  : "Abhi koi saved reply nahi hai."}
               </p>
             ) : (
               filteredReplies.map((reply) => (
