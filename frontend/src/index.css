@@ -1705,6 +1705,83 @@ select:focus-visible {
   color: var(--error-color);
 }
 
+.greeting-toggle {
+  cursor: pointer;
+}
+
+.greeting-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary-green-dark);
+  cursor: pointer;
+}
+
+.greeting-editor {
+  width: 100%;
+  min-height: 80px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-secondary);
+  color: var(--primary-text);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.greeting-editor:focus {
+  border-color: #128c7e;
+  outline: none;
+}
+
+.greeting-preview {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-secondary);
+}
+
+.greeting-preview strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--secondary-text);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.greeting-preview p {
+  margin: 0;
+  color: var(--primary-text);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.greeting-warning {
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--error-color) 9%, var(--surface-primary));
+  color: var(--error-color);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-saved {
+  margin: 6px 0;
+  color: var(--primary-green-dark);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.quick-reply-active {
+  background: color-mix(in srgb, var(--primary-green) 12%, var(--surface-primary)) !important;
+}
+
 .spin {
   animation: spin 900ms linear infinite;
 }
