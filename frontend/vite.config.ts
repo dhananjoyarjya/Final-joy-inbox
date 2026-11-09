@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig(({ command }) => ({
-  base: command === "build" ? "/Final-joy-inbox/" : "/",
+  base: process.env.GITHUB_PAGES === "true" ? "/Final-joy-inbox/" : "/",
   plugins: [react(), tailwindcss()],
   server: {
     host: "0.0.0.0",

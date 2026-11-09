@@ -123,6 +123,8 @@ Meta's verification request is handled by `GET /webhook`; incoming events are ha
 
 Set frontend values from `frontend/.env.example`, including `VITE_API_BASE_URL` as the Lambda Function URL without a path suffix. Add the frontend domain to Firebase Authentication's authorized domains and set the matching origin in Lambda's `CORS_ORIGINS`. Build and deploy the frontend, then sign in as the Firebase user whose UID is fixed in source as the owner.
 
+The Cloudflare Pages project serves from the domain root, so its Vite build uses `/` as the asset base by default. The GitHub Pages workflow sets `GITHUB_PAGES=true` to build with the repository-path base.
+
 ### Configure FCM Web Push
 
 1. In Firebase Console, open **Project settings → Cloud Messaging** and create a Web Push certificate key pair if one is not already configured. Copy its public key into `VITE_FIREBASE_VAPID_KEY`; it is a public web configuration value, not a service-account credential.
