@@ -724,6 +724,49 @@ select:focus-visible {
   touch-action: pan-y;
 }
 
+.message-line.message-swiping {
+  user-select: none;
+}
+
+.message-swipe-content {
+  position: relative;
+  width: fit-content;
+  max-width: min(74%, 620px);
+}
+
+.message-swipe-content .message-bubble {
+  max-width: 100%;
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.message-swipe-reply {
+  position: absolute;
+  top: 50%;
+  left: -38px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--primary-green) 18%, var(--surface-primary));
+  color: var(--primary-green-dark);
+  opacity: 0;
+  transform: translateY(-50%) scale(0.75);
+  transition: opacity 120ms ease, transform 180ms ease, background 120ms ease;
+  pointer-events: none;
+}
+
+.message-line.message-swiping .message-swipe-reply {
+  opacity: 1;
+  transform: translateY(-50%) scale(1);
+}
+
+.message-swipe-reply.ready {
+  background: var(--primary-green);
+  color: #fff;
+  transform: translateY(-50%) scale(1.12);
+}
+
 .message-line.message-selected {
   background: color-mix(in srgb, var(--primary-green) 11%, transparent);
 }

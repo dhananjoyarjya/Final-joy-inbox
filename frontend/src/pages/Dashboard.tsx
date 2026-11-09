@@ -5,6 +5,7 @@ import {
   useState,
   type FormEvent,
   type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import {
   Archive,
@@ -75,6 +76,16 @@ type View = "chats" | "contacts" | "replies" | "archived" | "settings";
 type ChatFilter = "all" | "unread" | "pinned";
 type Theme = "light" | "dark" | "system";
 type MessageActionMenu = { message: ChatMessage; x: number; y: number };
+type MessageSwipe = { messageId: string; offset: number; active: boolean; triggered: boolean };
+type MessageSwipeGesture = {
+  messageId: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  active: boolean;
+  cancelled: boolean;
+};
+type TrackpadSwipe = { messageId: string; offset: number; lastAt: number; timeout: number };
 
 function asDate(value: unknown): Date | null {
   if (!value) return null;
@@ -174,6 +185,7 @@ export default function Dashboard() {
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
   const [messageActionMenu, setMessageActionMenu] = useState<MessageActionMenu | null>(null);
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  const [messageSwipe, setMessageSwipe] = useState<MessageSwipe | null>(null);
   const [forwardMessageIds, setForwardMessageIds] = useState<string[] | null>(null);
   const [forwardingMessages, setForwardingMessages] = useState(false);
   const [deletingMessages, setDeletingMessages] = useState(false);
@@ -221,6 +233,8 @@ export default function Dashboard() {
   const suppressChatClick = useRef(false);
   const messageLongPressTimer = useRef<number | null>(null);
   const messageLongPressPoint = useRef<{ x: number; y: number } | null>(null);
+  const messageSwipeGesture = useRef<MessageSwipeGesture | null>(null);
+  const trackpadSwipe = useRef<TrackpadSwipe | null>(null);
   const suppressMessageClick = useRef<string | null>(null);
   const pendingChatDeletionIds = useRef<Set<string>>(new Set());
   const slashKeyHandler = useRef<((key: string) => boolean) | null>(null);
@@ -237,6 +251,7 @@ export default function Dashboard() {
     if (messageLongPressTimer.current !== null) {
       window.clearTimeout(messageLongPressTimer.current);
     }
+    if (trackpadSwipe.current) window.clearTimeout(trackpadSwipe.current.timeout);
   }, []);
 
   useEffect(() => {
@@ -607,6 +622,137 @@ export default function Dashboard() {
     }, 500);
   }
 
+  function startMessageSwipe(item: ChatMessage, event: ReactPointerEvent<HTMLDivElement>) {
+    if (
+      !event.isPrimary ||
+      event.button !== 0 ||
+      selectedMessageIds.size > 0 ||
+      selectedMessageIds.has(getMessageDocumentId(item)) ||
+      (event.target instanceof Element &&
+        event.target.closest("button, a, input, video, audio, [contenteditable='true']"))
+    ) {
+      messageSwipeGesture.current = null;
+      return;
+    }
+
+    messageSwipeGesture.current = {
+      messageId: getMessageDocumentId(item),
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+      cancelled: false,
+    };
+    if (event.pointerType === "mouse") {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+  }
+
+  function moveMessageSwipe(item: ChatMessage, event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = messageSwipeGesture.current;
+    if (!gesture || gesture.pointerId !== event.pointerId || gesture.cancelled) return;
+
+    const deltaX = event.clientX - gesture.startX;
+    const deltaY = event.clientY - gesture.startY;
+    if (!gesture.active) {
+      if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) < 8) return;
+      if (deltaX <= 0 || Math.abs(deltaY) >= Math.abs(deltaX)) {
+        gesture.cancelled = true;
+        return;
+      }
+
+      gesture.active = true;
+      cancelMessageLongPress();
+      suppressMessageClick.current = gesture.messageId;
+    }
+
+    if (deltaX <= 0 || Math.abs(deltaY) >= deltaX) {
+      gesture.cancelled = true;
+      setMessageSwipe(null);
+      return;
+    }
+
+    event.preventDefault();
+    const offset = Math.min(deltaX, 116);
+    setMessageSwipe({
+      messageId: getMessageDocumentId(item),
+      offset,
+      active: true,
+      triggered: offset >= 72,
+    });
+  }
+
+  function finishMessageSwipe(item: ChatMessage, event: ReactPointerEvent<HTMLDivElement>) {
+    cancelMessageLongPress();
+    const gesture = messageSwipeGesture.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    const deltaX = event.clientX - gesture.startX;
+    const deltaY = event.clientY - gesture.startY;
+    const shouldReply =
+      gesture.active &&
+      deltaX >= 72 &&
+      Math.abs(deltaY) < deltaX &&
+      !gesture.cancelled;
+    messageSwipeGesture.current = null;
+    setMessageSwipe(null);
+    if (shouldReply) {
+      suppressMessageClick.current = gesture.messageId;
+      beginReply(item);
+    }
+  }
+
+  function cancelMessageSwipe(event: ReactPointerEvent<HTMLDivElement>) {
+    cancelMessageLongPress();
+    if (messageSwipeGesture.current?.pointerId !== event.pointerId) return;
+    messageSwipeGesture.current = null;
+    setMessageSwipe(null);
+  }
+
+  function handleMessageWheel(item: ChatMessage, event: ReactWheelEvent<HTMLDivElement>) {
+    if (Math.abs(event.deltaY) >= Math.abs(event.deltaX) && trackpadSwipe.current) {
+      window.clearTimeout(trackpadSwipe.current.timeout);
+      trackpadSwipe.current = null;
+      setMessageSwipe(null);
+    }
+
+    if (
+      event.deltaX >= 0 ||
+      Math.abs(event.deltaX) <= Math.abs(event.deltaY) ||
+      selectedMessageIds.size > 0 ||
+      selectedMessageIds.has(getMessageDocumentId(item)) ||
+      (event.target instanceof Element &&
+        event.target.closest("button, a, input, video, audio, [contenteditable='true']"))
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    const itemId = getMessageDocumentId(item);
+    const now = Date.now();
+    const previous = trackpadSwipe.current;
+    const offset =
+      previous?.messageId === itemId && now - previous.lastAt < 220
+        ? Math.min(previous.offset + Math.abs(event.deltaX), 116)
+        : Math.min(Math.abs(event.deltaX), 116);
+
+    if (previous) window.clearTimeout(previous.timeout);
+    if (offset >= 72) {
+      trackpadSwipe.current = null;
+      setMessageSwipe(null);
+      suppressMessageClick.current = itemId;
+      beginReply(item);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      trackpadSwipe.current = null;
+      setMessageSwipe(null);
+    }, 180);
+    trackpadSwipe.current = { messageId: itemId, offset, lastAt: now, timeout };
+    setMessageSwipe({ messageId: itemId, offset, active: true, triggered: false });
+  }
+
   function moveMessageLongPress(event: ReactPointerEvent<HTMLDivElement>) {
     const point = messageLongPressPoint.current;
     if (
@@ -975,7 +1121,7 @@ export default function Dashboard() {
           messageSource,
           uploadController.current.signal,
           setUploadProgress,
-          replyTo ? getMessageDocumentId(replyTo) : undefined
+          replyTo?.messageId
         );
         setAttachment(null);
         if (fileInput.current) fileInput.current.value = "";
@@ -985,7 +1131,7 @@ export default function Dashboard() {
           text,
           selectedChat.id,
           messageSource,
-          replyTo ? getMessageDocumentId(replyTo) : undefined
+          replyTo?.messageId
         );
       }
       setMessage("");
@@ -1560,12 +1706,19 @@ export default function Dashboard() {
                         initial={{ opacity: 0, y: 5 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 0.16 }}
-                        className={`message-line ${outgoing ? "outgoing" : "incoming"} ${isSelected ? "message-selected" : ""}`}
-                        onPointerDown={(event) => startMessageLongPress(item, event)}
-                        onPointerMove={moveMessageLongPress}
-                        onPointerUp={cancelMessageLongPress}
-                        onPointerCancel={cancelMessageLongPress}
+                        className={`message-line ${outgoing ? "outgoing" : "incoming"} ${isSelected ? "message-selected" : ""} ${messageSwipe?.messageId === itemId ? "message-swiping" : ""}`}
+                        onPointerDown={(event) => {
+                          startMessageLongPress(item, event);
+                          startMessageSwipe(item, event);
+                        }}
+                        onPointerMove={(event) => {
+                          moveMessageLongPress(event);
+                          moveMessageSwipe(item, event);
+                        }}
+                        onPointerUp={(event) => finishMessageSwipe(item, event)}
+                        onPointerCancel={cancelMessageSwipe}
                         onPointerLeave={cancelMessageLongPress}
+                        onWheel={(event) => handleMessageWheel(item, event)}
                         onContextMenu={(event) => {
                           event.preventDefault();
                           openMessageActionMenu(item, event.clientX, event.clientY);
@@ -1575,42 +1728,54 @@ export default function Dashboard() {
                           handleMessageClick(item);
                         }}
                       >
-                        <article
-                          className={`message-bubble ${outgoing ? "sent" : "received"} ${isSelected ? "selected" : ""}`}
-                          tabIndex={0}
-                          role="group"
-                          aria-label={`${outgoing ? "Sent" : "Received"} message${isSelected ? ", selected" : ""}`}
-                          onKeyDown={(event) => {
-                            if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-                              event.preventDefault();
-                              const bounds = event.currentTarget.getBoundingClientRect();
-                              openMessageActionMenu(item, bounds.left + bounds.width / 2, bounds.bottom);
-                            }
-                          }}
-                        >
-                          {repliedMessage && (
-                            <div className="message-quote">
-                              <strong>{repliedMessage.direction === "outgoing" ? "You" : displayName(selectedChat)}</strong>
-                              <span>{repliedMessage.text || `${repliedMessage.type} message`}</span>
-                            </div>
-                          )}
-                          {item.pinned && <span className="message-pinned-indicator"><Pin size={12} />Pinned</span>}
-                          {item.mediaStoragePath || item.mediaId ? (
-                            <MessageMedia chatId={selectedChat.id} message={item} />
-                          ) : item.type !== "text" ? (
-                            <p className="media-unavailable">{item.mediaDownloadError || `${item.type} attachment is unavailable.`}</p>
-                          ) : null}
-                          <p>{item.text || "This message type is not available in this inbox yet."}</p>
-                          <div className="message-meta">
-                            <time>{formatTime(item.timestamp)}</time>
-                            {outgoing && statusLabel(item.status) && (
-                              <span className={item.status === "failed" ? "failed-status" : ""}>
-                                {item.status === "read" || item.status === "delivered" ? <CheckCheck size={14} /> : null}
-                                {statusLabel(item.status)}
-                              </span>
+                        <div className="message-swipe-content">
+                          <span className={`message-swipe-reply ${messageSwipe?.messageId === itemId && messageSwipe.triggered ? "ready" : ""}`} aria-hidden="true">
+                            <Reply size={18} />
+                          </span>
+                          <article
+                            className={`message-bubble ${outgoing ? "sent" : "received"} ${isSelected ? "selected" : ""}`}
+                            style={{
+                              transform: `translateX(${messageSwipe?.messageId === itemId ? messageSwipe.offset : 0}px)`,
+                              transition:
+                                messageSwipe?.messageId === itemId && messageSwipe.active
+                                  ? "none"
+                                  : undefined,
+                            }}
+                            tabIndex={0}
+                            role="group"
+                            aria-label={`${outgoing ? "Sent" : "Received"} message${isSelected ? ", selected" : ""}`}
+                            onKeyDown={(event) => {
+                              if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                                event.preventDefault();
+                                const bounds = event.currentTarget.getBoundingClientRect();
+                                openMessageActionMenu(item, bounds.left + bounds.width / 2, bounds.bottom);
+                              }
+                            }}
+                          >
+                            {repliedMessage && (
+                              <div className="message-quote">
+                                <strong>{repliedMessage.direction === "outgoing" ? "You" : displayName(selectedChat)}</strong>
+                                <span>{repliedMessage.text || `${repliedMessage.type} message`}</span>
+                              </div>
                             )}
-                          </div>
-                        </article>
+                            {item.pinned && <span className="message-pinned-indicator"><Pin size={12} />Pinned</span>}
+                            {item.mediaStoragePath || item.mediaId ? (
+                              <MessageMedia chatId={selectedChat.id} message={item} />
+                            ) : item.type !== "text" ? (
+                              <p className="media-unavailable">{item.mediaDownloadError || `${item.type} attachment is unavailable.`}</p>
+                            ) : null}
+                            <p>{item.text || "This message type is not available in this inbox yet."}</p>
+                            <div className="message-meta">
+                              <time>{formatTime(item.timestamp)}</time>
+                              {outgoing && statusLabel(item.status) && (
+                                <span className={item.status === "failed" ? "failed-status" : ""}>
+                                  {item.status === "read" || item.status === "delivered" ? <CheckCheck size={14} /> : null}
+                                  {statusLabel(item.status)}
+                                </span>
+                              )}
+                            </div>
+                          </article>
+                        </div>
                       </motion.div>
                     );
                   })
