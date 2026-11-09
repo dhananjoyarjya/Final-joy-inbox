@@ -32,6 +32,9 @@ export interface ChatMessage {
   source?: "manual" | "quick_reply" | "whatsapp" | "webhook";
   pinned?: boolean;
   replyToMessageId?: string;
+  replyToMessageText?: string;
+  replyToMessageSender?: string;
+  replyToMessageType?: string;
 }
 
 export interface QuickReply {

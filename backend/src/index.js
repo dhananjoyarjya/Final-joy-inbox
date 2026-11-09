@@ -166,9 +166,9 @@ async function sendMessage(event) {
       error: "Message is too long."
     });
   }
-
   const db = getDb();
   const contextMessageId = body.contextMessageId;
+  let contextMessageData = null;
   if (
     contextMessageId !== undefined &&
     (typeof contextMessageId !== "string" ||
@@ -186,6 +186,7 @@ async function sendMessage(event) {
     if (!contextSnapshot.exists) {
       return jsonResponse(event, 404, { error: "The message being replied to was not found." });
     }
+    contextMessageData = contextSnapshot.data();
   }
 
   const result = await sendWhatsAppText(to, messageText, contextMessageId);
@@ -209,7 +210,14 @@ async function sendMessage(event) {
       source: body.source === "quick_reply"
         ? "quick_reply"
         : "manual",
-      ...(contextMessageId ? { replyToMessageId: contextMessageId } : {}),
+      ...(contextMessageId ? {
+        replyToMessageId: contextMessageId,
+        replyToMessageText: String(contextMessageData.text || ""),
+        replyToMessageSender: contextMessageData.direction === "outgoing"
+          ? "You"
+          : String(contextMessageData.sender || chatId),
+        replyToMessageType: String(contextMessageData.type || "unknown")
+      } : {}),
       sender: "owner"
     });
 
@@ -487,6 +495,7 @@ async function sendMediaMessage(event) {
   }
 
   const contextMessageId = body.contextMessageId;
+  let contextMessageData = null;
   if (
     contextMessageId !== undefined &&
     (typeof contextMessageId !== "string" ||
@@ -504,6 +513,7 @@ async function sendMediaMessage(event) {
     if (!contextSnapshot.exists) {
       return jsonResponse(event, 404, { error: "The message being replied to was not found." });
     }
+    contextMessageData = contextSnapshot.data();
   }
 
   const encoded = String(body.fileBase64 || "");
@@ -588,7 +598,14 @@ async function sendMediaMessage(event) {
       status: "sent",
       source: body.source === "quick_reply" ? "quick_reply" : "manual",
       sender: "owner",
-      ...(contextMessageId ? { replyToMessageId: contextMessageId } : {}),
+      ...(contextMessageId ? {
+        replyToMessageId: contextMessageId,
+        replyToMessageText: String(contextMessageData.text || ""),
+        replyToMessageSender: contextMessageData.direction === "outgoing"
+          ? "You"
+          : String(contextMessageData.sender || chatId),
+        replyToMessageType: String(contextMessageData.type || "unknown")
+      } : {}),
       mediaId: uploaded.mediaId,
       mediaStoragePath: stored.storagePath,
       mediaMimeType: stored.mimeType,

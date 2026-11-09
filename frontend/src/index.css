@@ -806,13 +806,30 @@ select:focus-visible {
 
 .message-quote {
   display: flex;
+  width: 100%;
   flex-direction: column;
   gap: 2px;
   margin: 0 0 6px;
   padding: 5px 8px;
+  border: 0;
   border-left: 3px solid var(--primary-green-dark);
   border-radius: 4px;
   background: color-mix(in srgb, var(--primary-green) 12%, var(--surface-primary));
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 130ms ease;
+}
+
+.message-quote:hover {
+  background: color-mix(in srgb, var(--primary-green) 20%, var(--surface-primary));
+}
+
+.message-quote-target .message-bubble {
+  outline: 2px solid color-mix(in srgb, var(--primary-green-dark) 72%, transparent);
+  outline-offset: 3px;
+  transition: outline-color 180ms ease;
 }
 
 .message-quote strong,

@@ -82,6 +82,21 @@ async function saveIncomingMessage(message, contactName) {
   const timestamp = message.timestamp
     ? new Date(Number(message.timestamp) * 1000)
     : new Date();
+  const contextMessageId =
+    typeof message.context?.id === "string" &&
+    /^[A-Za-z0-9._:-]{1,256}$/.test(message.context.id)
+      ? message.context.id
+      : "";
+  let contextMessageData = null;
+  if (contextMessageId) {
+    const contextSnapshot = await db
+      .collection("chats")
+      .doc(phone)
+      .collection("messages")
+      .doc(contextMessageId)
+      .get();
+    if (contextSnapshot.exists) contextMessageData = contextSnapshot.data();
+  }
   const deletedChatRef = db.collection("deletedChats").doc(phone);
   const deletionSnapshot = await deletedChatRef.get();
   if (shouldSuppressInbound(deletionSnapshot, timestamp)) return false;
@@ -162,7 +177,15 @@ async function saveIncomingMessage(message, contactName) {
       mediaSize: media?.size || Number(mediaMessage.file_size) || null,
       mediaFilename: String(mediaMessage.filename || "").slice(0, 180) || null,
       mediaSha256: media?.sha256 || null,
-      mediaDownloadError: mediaError || null
+      mediaDownloadError: mediaError || null,
+      ...(contextMessageId ? {
+        replyToMessageId: contextMessageId,
+        replyToMessageText: String(contextMessageData?.text || ""),
+        replyToMessageSender: contextMessageData?.direction === "outgoing"
+          ? "You"
+          : String(contextMessageData?.sender || contactName || phone),
+        replyToMessageType: String(contextMessageData?.type || "unknown")
+      } : {})
     });
 
     transaction.set(

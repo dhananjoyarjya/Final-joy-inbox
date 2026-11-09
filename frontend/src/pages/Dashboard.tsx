@@ -50,6 +50,7 @@ import {
   loadOlderMessages,
   loadOlderChats,
   getChatById,
+  getWhatsAppMessage,
 } from "../services/chats";
 import {
   disablePushNotifications,
@@ -235,9 +236,13 @@ export default function Dashboard() {
   const messageLongPressPoint = useRef<{ x: number; y: number } | null>(null);
   const messageSwipeGesture = useRef<MessageSwipeGesture | null>(null);
   const trackpadSwipe = useRef<TrackpadSwipe | null>(null);
+  const messageElements = useRef(new Map<string, HTMLDivElement>());
+  const pendingQuotedMessageId = useRef<string | null>(null);
+  const selectedChatId = useRef<string | null>(selectedChat?.id || null);
   const suppressMessageClick = useRef<string | null>(null);
   const pendingChatDeletionIds = useRef<Set<string>>(new Set());
   const slashKeyHandler = useRef<((key: string) => boolean) | null>(null);
+  selectedChatId.current = selectedChat?.id || null;
 
   function registerSlashKeyHandler(handler: ((key: string) => boolean) | null) {
     slashKeyHandler.current = handler;
@@ -413,6 +418,7 @@ export default function Dashboard() {
   }, [olderChats, recentChats]);
 
   useEffect(() => {
+    pendingQuotedMessageId.current = null;
     if (!selectedChat?.id) {
       setMessages([]);
       setRecentMessages([]);
@@ -468,6 +474,17 @@ export default function Dashboard() {
     });
     setMessages(ordered);
   }, [olderMessages, recentMessages]);
+
+  useEffect(() => {
+    const messageId = pendingQuotedMessageId.current;
+    if (!messageId) return;
+    const element = messageElements.current.get(messageId);
+    if (!element) return;
+    pendingQuotedMessageId.current = null;
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+    element.classList.add("message-quote-target");
+    window.setTimeout(() => element.classList.remove("message-quote-target"), 1500);
+  }, [messageSearch, messages, showPinnedMessages]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -862,6 +879,49 @@ export default function Dashboard() {
     setMessageSource("manual");
     setMessageActionMenu(null);
     window.setTimeout(() => composerInputRef.current?.focus(), 0);
+  }
+
+  async function openQuotedMessage(messageId: string) {
+    if (!selectedChat) return;
+    const chatId = selectedChat.id;
+    setShowPinnedMessages(false);
+    setMessageSearch("");
+    pendingQuotedMessageId.current = messageId;
+
+    if (messageElements.current.has(messageId)) {
+      const element = messageElements.current.get(messageId);
+      if (element) {
+        pendingQuotedMessageId.current = null;
+        element.scrollIntoView({ behavior: "smooth", block: "center" });
+        element.classList.add("message-quote-target");
+        window.setTimeout(() => element.classList.remove("message-quote-target"), 1500);
+      }
+      return;
+    }
+
+    try {
+      const originalMessage = await getWhatsAppMessage(chatId, messageId);
+      if (selectedChatId.current !== chatId) return;
+      if (!originalMessage) {
+        pendingQuotedMessageId.current = null;
+        setError("The original quoted message is no longer available.");
+        return;
+      }
+      setOlderMessages((current) =>
+        current.some((item) => getMessageDocumentId(item) === messageId)
+          ? current
+          : [...current, originalMessage]
+      );
+    } catch (quoteError) {
+      if (selectedChatId.current !== chatId) return;
+      pendingQuotedMessageId.current = null;
+      console.error("Quoted message load failed:", quoteError);
+      setError(
+        quoteError instanceof Error
+          ? quoteError.message
+          : "The original quoted message could not be loaded."
+      );
+    }
   }
 
   function beginForward(messageIds: string[]) {
@@ -1696,13 +1756,32 @@ export default function Dashboard() {
                   visibleMessages.map((item) => {
                     const outgoing = item.direction === "outgoing";
                     const itemId = getMessageDocumentId(item);
+                    const replyToMessageId = item.replyToMessageId;
                     const isSelected = selectedMessageIds.has(itemId);
-                    const repliedMessage = item.replyToMessageId
-                      ? messages.find((messageItem) => getMessageDocumentId(messageItem) === item.replyToMessageId)
+                    const repliedMessage = replyToMessageId
+                      ? messages.find((messageItem) => getMessageDocumentId(messageItem) === replyToMessageId)
                       : null;
+                    const replyPreviewText =
+                      item.replyToMessageText ||
+                      repliedMessage?.text ||
+                      "";
+                    const replyPreviewType =
+                      item.replyToMessageType || repliedMessage?.type || "unknown";
+                    const replyPreviewSender =
+                      repliedMessage?.direction === "outgoing"
+                        ? "You"
+                        : repliedMessage
+                          ? displayName(selectedChat)
+                          : item.replyToMessageSender === selectedChat.customerPhone
+                            ? displayName(selectedChat)
+                            : item.replyToMessageSender || displayName(selectedChat);
                     return (
                       <motion.div
                         key={itemId}
+                        ref={(element) => {
+                          if (element) messageElements.current.set(itemId, element);
+                          else messageElements.current.delete(itemId);
+                        }}
                         initial={{ opacity: 0, y: 5 }}
                         animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 0.16 }}
@@ -1752,11 +1831,19 @@ export default function Dashboard() {
                               }
                             }}
                           >
-                            {repliedMessage && (
-                              <div className="message-quote">
-                                <strong>{repliedMessage.direction === "outgoing" ? "You" : displayName(selectedChat)}</strong>
-                                <span>{repliedMessage.text || `${repliedMessage.type} message`}</span>
-                              </div>
+                            {replyToMessageId && (
+                              <button
+                                type="button"
+                                className="message-quote"
+                                aria-label={`Jump to message from ${replyPreviewSender}: ${replyPreviewText || `${replyPreviewType} message`}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void openQuotedMessage(replyToMessageId);
+                                }}
+                              >
+                                <strong>{replyPreviewSender}</strong>
+                                <span>{replyPreviewText || `${replyPreviewType} message`}</span>
+                              </button>
                             )}
                             {item.pinned && <span className="message-pinned-indicator"><Pin size={12} />Pinned</span>}
                             {item.mediaStoragePath || item.mediaId ? (

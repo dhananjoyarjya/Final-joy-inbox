@@ -30,6 +30,21 @@ export async function getChatById(chatId: string): Promise<Chat | null> {
   } as Chat;
 }
 
+export async function getWhatsAppMessage(
+  chatId: string,
+  messageId: string
+): Promise<ChatMessage | null> {
+  if (!/^\d{6,20}$/.test(chatId) || !/^[A-Za-z0-9._:-]{1,256}$/.test(messageId)) {
+    return null;
+  }
+  const snapshot = await getDoc(doc(db, "chats", chatId, "messages", messageId));
+  if (!snapshot.exists()) return null;
+  return {
+    id: snapshot.id,
+    ...snapshot.data(),
+  } as ChatMessage;
+}
+
 export function listenToChats(
   callback: (
     chats: Chat[],
