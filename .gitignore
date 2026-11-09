@@ -1,4 +1,40 @@
-# Dependencies
+URGENT BUG FIX: WhatsApp-style Swipe-to-Reply is not working in Joy Inbox.
+
+The quoted reply feature was implemented, but swiping a chat message does nothing.
+
+Please inspect the existing code and fix the actual swipe interaction.
+
+Requirements:
+
+1. Allow users to swipe an individual message to the right to trigger Reply.
+2. Show a smooth WhatsApp-style swipe animation.
+3. Display a reply icon while swiping.
+4. When the swipe threshold is reached, activate the existing quoted-reply functionality.
+5. Show the selected original message preview above the message composer.
+6. Sending the reply must correctly reference the original WhatsApp message ID.
+7. Support both incoming customer messages and outgoing messages.
+8. Support touch gestures on Android/mobile and mouse or trackpad interactions on desktop.
+9. Prevent normal vertical scrolling from accidentally triggering reply.
+10. Ensure swipe gestures do not interfere with message selection, scrolling, or existing chat actions.
+
+IMPORTANT:
+
+- First inspect the existing implementation and identify why swipe-to-reply is not working.
+- Reuse the existing quoted-reply functionality. Do not create a separate fake reply system.
+- Do not rebuild Joy Inbox.
+- Do not break Firebase synchronization, WhatsApp Cloud API, chat history, or notifications.
+- Preserve the existing UI and design.
+- Test the feature after implementation.
+
+After fixing:
+
+- Run the frontend production build.
+- Check for TypeScript and runtime errors.
+- List the exact files changed.
+- Explain the actual cause of the bug.
+- Do not claim it is fixed unless the implementation and build have been verified.
+
+If you need any additional information, ask me before making assumptions.# Dependencies
 node_modules/
 frontend/node_modules/
 backend/node_modules/
