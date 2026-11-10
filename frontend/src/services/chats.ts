@@ -139,8 +139,12 @@ export function listenToPinnedMessages(
         ...document.data(),
       })) as ChatMessage[];
       callback(messages.sort((a, b) => {
-        const aTime = a.timestamp?.toDate().getTime() || 0;
-        const bTime = b.timestamp?.toDate().getTime() || 0;
+        const aTime = a.timestamp instanceof Date
+          ? a.timestamp.getTime()
+          : a.timestamp?.toDate().getTime() || 0;
+        const bTime = b.timestamp instanceof Date
+          ? b.timestamp.getTime()
+          : b.timestamp?.toDate().getTime() || 0;
         return aTime - bTime || a.id.localeCompare(b.id);
       }));
     },

@@ -329,8 +329,13 @@ async function updateMessageStatus(status) {
 
   const messageId = status.id;
   const recipient = normalizePhoneNumber(status.recipient_id);
+  const nextStatus = status.status;
 
-  if (!messageId || !recipient) {
+  if (
+    !messageId ||
+    !recipient ||
+    !["sent", "delivered", "read", "failed"].includes(nextStatus)
+  ) {
     return;
   }
 
@@ -340,19 +345,21 @@ async function updateMessageStatus(status) {
     .collection("messages")
     .doc(messageId);
 
-  const snapshot = await messageRef.get();
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(messageRef);
+    if (!snapshot.exists) return;
 
-  if (!snapshot.exists) {
-    return;
-  }
+    const currentStatus = snapshot.data().status;
+    const rank = { failed: 0, sent: 1, delivered: 2, read: 3 };
+    if (rank[nextStatus] <= (rank[currentStatus] ?? -1)) {
+      return;
+    }
 
-  await messageRef.set(
-    {
-      status: status.status || "unknown",
+    transaction.update(messageRef, {
+      status: nextStatus,
       statusUpdatedAt: new Date()
-    },
-    { merge: true }
-  );
+    });
+  });
 }
 
 async function processWebhookPayload(payload) {

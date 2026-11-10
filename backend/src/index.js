@@ -28,6 +28,10 @@ const {
 const { OWNER_UID } = require("./owner");
 const { resolveReplyContext, getReplyMessageFields } = require("./replies");
 const {
+  claimSendRequest,
+  markSendRequestFailed
+} = require("./sendRequests");
+const {
   getDeviceDocument,
   isValidFcmToken,
   isValidInstallationId
@@ -55,6 +59,29 @@ function parseBody(event) {
     : event.body;
 
   return JSON.parse(body);
+}
+
+function getClientMessageId(value) {
+  if (value === undefined) return crypto.randomUUID();
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    const error = new Error("A valid client message ID is required.");
+    error.statusCode = 400;
+    error.retryable = false;
+    throw error;
+  }
+  return value;
+}
+
+function hashSendPayload(payload) {
+  return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function logLatency(name, startedAt, details = {}) {
+  console.info(JSON.stringify({
+    metric: name,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    ...details
+  }));
 }
 
 async function authenticateOwner(event) {
@@ -167,54 +194,89 @@ async function sendMessage(event) {
       error: "Message is too long."
     });
   }
+  const clientMessageId = getClientMessageId(body.clientMessageId);
   const db = getDb();
+  const replyLookupStartedAt = Date.now();
   const replyContext = await resolveReplyContext(db, chatId, body);
-
-  const result = await sendWhatsAppText(
-    to,
-    messageText,
-    replyContext?.contextMessageId
-  );
+  if (body.replyToMessageId || body.contextMessageId) {
+    logLatency("firestore_reply_lookup_ms", replyLookupStartedAt);
+  }
 
   const chatRef = db.collection("chats").doc(chatId);
-  const messageRef = chatRef
-    .collection("messages")
-    .doc(result.messageId);
-
-  const timestamp = new Date();
-
-  await db.runTransaction(async (transaction) => {
-    transaction.set(messageRef, {
-      messageId: result.messageId,
-      chatId,
-      direction: "outgoing",
-      type: "text",
-      text: messageText,
-      timestamp,
-      status: "sent",
-      source: body.source === "quick_reply"
-        ? "quick_reply"
-        : "manual",
-      ...getReplyMessageFields(replyContext),
-      sender: "owner"
-    });
-
-    transaction.set(
-      chatRef,
-      {
-        customerPhone: chatId,
-        lastMessage: messageText,
-        lastMessageAt: timestamp,
-        lastMessageDirection: "outgoing",
-        updatedAt: timestamp
-      },
-      { merge: true }
-    );
+  const payloadHash = hashSendPayload({
+    to,
+    text: messageText,
+    source: body.source === "quick_reply" ? "quick_reply" : "manual",
+    contextMessageId: replyContext?.contextMessageId || null
   });
+  const claimStartedAt = Date.now();
+  const claim = await claimSendRequest(db, chatId, clientMessageId, payloadHash);
+  logLatency("firestore_send_claim_ms", claimStartedAt);
+
+  if (claim.state === "completed") {
+    return jsonResponse(event, 200, {
+      success: true,
+      messageId: claim.messageId,
+      clientMessageId
+    });
+  }
+  if (claim.state === "pending") {
+    return jsonResponse(event, 202, {
+      success: true,
+      pending: true,
+      clientMessageId
+    });
+  }
+
+  let result;
+  try {
+    result = await sendWhatsAppText(
+      to,
+      messageText,
+      replyContext?.contextMessageId
+    );
+  } catch (error) {
+    await markSendRequestFailed(claim.ref, error);
+    throw error;
+  }
+
+  const messageRef = chatRef.collection("messages").doc(result.messageId);
+  const timestamp = new Date();
+  const batch = db.batch();
+  batch.set(messageRef, {
+    messageId: result.messageId,
+    clientMessageId,
+    chatId,
+    direction: "outgoing",
+    type: "text",
+    text: messageText,
+    timestamp,
+    status: "sending",
+    source: body.source === "quick_reply" ? "quick_reply" : "manual",
+    ...getReplyMessageFields(replyContext),
+    sender: "owner"
+  });
+  batch.set(chatRef, {
+    customerPhone: chatId,
+    lastMessage: messageText,
+    lastMessageAt: timestamp,
+    lastMessageDirection: "outgoing",
+    updatedAt: timestamp
+  }, { merge: true });
+  batch.set(claim.ref, {
+    status: "completed",
+    messageId: result.messageId,
+    updatedAt: timestamp
+  }, { merge: true });
+
+  const persistenceStartedAt = Date.now();
+  await batch.commit();
+  logLatency("firestore_send_persistence_ms", persistenceStartedAt);
 
   return jsonResponse(event, 200, {
     success: true,
-    messageId: result.messageId
+    messageId: result.messageId,
+    clientMessageId
   });
 }
 
@@ -432,7 +494,10 @@ async function deleteChats(event) {
       });
 
       const chatRef = db.collection("chats").doc(chatId);
-      await db.recursiveDelete(chatRef.collection("messages"));
+      await Promise.all([
+        db.recursiveDelete(chatRef.collection("messages")),
+        db.recursiveDelete(chatRef.collection("sendRequests"))
+      ]);
       await chatRef.delete();
       await deletionRef.set({
         deletedAt: new Date(),
@@ -473,7 +538,12 @@ async function sendMediaMessage(event) {
   }
 
   const db = getDb();
+  const replyLookupStartedAt = Date.now();
   const replyContext = await resolveReplyContext(db, chatId, body);
+  if (body.replyToMessageId || body.contextMessageId) {
+    logLatency("firestore_reply_lookup_ms", replyLookupStartedAt, { media: true });
+  }
+  const clientMessageId = getClientMessageId(body.clientMessageId);
 
   const encoded = String(body.fileBase64 || "");
   const maxEncodedLength = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4;
@@ -519,12 +589,45 @@ async function sendMediaMessage(event) {
     return jsonResponse(event, 400, { error: "WhatsApp audio messages do not support captions." });
   }
 
-  const uploaded = await uploadWhatsAppMedia(buffer, mimeType, filename);
-  const storageId = crypto.randomUUID();
-  const stored = await saveMessageMedia(chatId, storageId, buffer, mimeType, filename);
+  const payloadHash = hashSendPayload({
+    to,
+    type,
+    caption,
+    filename,
+    mimeType,
+    source: body.source === "quick_reply" ? "quick_reply" : "manual",
+    contextMessageId: replyContext?.contextMessageId || null,
+    contentHash: crypto.createHash("sha256").update(buffer).digest("hex")
+  });
+  const claimStartedAt = Date.now();
+  const claim = await claimSendRequest(db, chatId, clientMessageId, payloadHash);
+  logLatency("firestore_send_claim_ms", claimStartedAt, { media: true });
+
+  if (claim.state === "completed") {
+    return jsonResponse(event, 200, {
+      success: true,
+      messageId: claim.messageId,
+      clientMessageId
+    });
+  }
+  if (claim.state === "pending") {
+    return jsonResponse(event, 202, {
+      success: true,
+      pending: true,
+      clientMessageId
+    });
+  }
+
+  let uploaded;
+  let stored;
   let result;
+  let whatsappSendStarted = false;
 
   try {
+    uploaded = await uploadWhatsAppMedia(buffer, mimeType, filename);
+    const storageId = crypto.randomUUID();
+    stored = await saveMessageMedia(chatId, storageId, buffer, mimeType, filename);
+    whatsappSendStarted = true;
     result = await sendWhatsAppMedia(
       to,
       type,
@@ -534,9 +637,16 @@ async function sendMediaMessage(event) {
       replyContext?.contextMessageId
     );
   } catch (error) {
-    await deleteMessageMedia(stored.storagePath).catch((cleanupError) => {
-      console.error("Failed to remove unsent media object:", cleanupError);
-    });
+    if (stored?.storagePath && (!whatsappSendStarted || error.definitive)) {
+      await deleteMessageMedia(stored.storagePath).catch((cleanupError) => {
+        console.error("Failed to remove unsent media object:", cleanupError);
+      });
+    }
+    if (!whatsappSendStarted) {
+      error.definitive = true;
+      error.retryable = false;
+    }
+    await markSendRequestFailed(claim.ref, error);
     throw error;
   }
 
@@ -544,41 +654,46 @@ async function sendMediaMessage(event) {
   const messageRef = chatRef.collection("messages").doc(result.messageId);
   const timestamp = new Date();
   const preview = caption || `${type[0].toUpperCase()}${type.slice(1)}`;
-
-  await db.runTransaction(async (transaction) => {
-    transaction.set(messageRef, {
-      messageId: result.messageId,
-      chatId,
-      direction: "outgoing",
-      type,
-      text: caption,
-      timestamp,
-      status: "sent",
-      source: body.source === "quick_reply" ? "quick_reply" : "manual",
-      sender: "owner",
-      ...getReplyMessageFields(replyContext),
-      mediaId: uploaded.mediaId,
-      mediaStoragePath: stored.storagePath,
-      mediaMimeType: stored.mimeType,
-      mediaSize: stored.size,
-      mediaFilename: filename
-    });
-    transaction.set(
-      chatRef,
-      {
-        customerPhone: chatId,
-        lastMessage: preview,
-        lastMessageAt: timestamp,
-        lastMessageDirection: "outgoing",
-        updatedAt: timestamp
-      },
-      { merge: true }
-    );
+  const batch = db.batch();
+  batch.set(messageRef, {
+    messageId: result.messageId,
+    clientMessageId,
+    chatId,
+    direction: "outgoing",
+    type,
+    text: caption,
+    timestamp,
+    status: "sending",
+    source: body.source === "quick_reply" ? "quick_reply" : "manual",
+    sender: "owner",
+    ...getReplyMessageFields(replyContext),
+    mediaId: uploaded.mediaId,
+    mediaStoragePath: stored.storagePath,
+    mediaMimeType: stored.mimeType,
+    mediaSize: stored.size,
+    mediaFilename: filename
   });
+  batch.set(chatRef, {
+    customerPhone: chatId,
+    lastMessage: preview,
+    lastMessageAt: timestamp,
+    lastMessageDirection: "outgoing",
+    updatedAt: timestamp
+  }, { merge: true });
+  batch.set(claim.ref, {
+    status: "completed",
+    messageId: result.messageId,
+    updatedAt: timestamp
+  }, { merge: true });
+
+  const persistenceStartedAt = Date.now();
+  await batch.commit();
+  logLatency("firestore_send_persistence_ms", persistenceStartedAt, { media: true });
 
   return jsonResponse(event, 200, {
     success: true,
-    messageId: result.messageId
+    messageId: result.messageId,
+    clientMessageId
   });
 }
 
@@ -725,6 +840,7 @@ exports.handler = async (event) => {
   }
 
   if (method === "POST" && path.endsWith("/send")) {
+    const startedAt = Date.now();
     try {
       return await sendMessage(event);
     } catch (error) {
@@ -736,9 +852,12 @@ exports.handler = async (event) => {
         {
           error: error.statusCode
             ? error.message
-            : error.message || "Message could not be sent."
+            : error.message || "Message could not be sent.",
+          retryable: error.retryable ?? !error.definitive
         }
       );
+    } finally {
+      logLatency("lambda_send_ms", startedAt);
     }
   }
 
@@ -822,6 +941,7 @@ exports.handler = async (event) => {
   }
 
   if (method === "POST" && path.endsWith("/send-media")) {
+    const startedAt = Date.now();
     try {
       return await sendMediaMessage(event);
     } catch (error) {
@@ -829,8 +949,11 @@ exports.handler = async (event) => {
       return jsonResponse(event, error.statusCode || 500, {
         error: error.statusCode
           ? error.message
-          : error.message || "Media message could not be sent."
+          : error.message || "Media message could not be sent.",
+        retryable: error.retryable ?? !error.definitive
       });
+    } finally {
+      logLatency("lambda_send_ms", startedAt, { media: true });
     }
   }
 

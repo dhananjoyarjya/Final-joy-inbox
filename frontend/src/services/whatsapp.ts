@@ -24,12 +24,20 @@ const MEDIA_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 ]);
 
+class WhatsAppSendError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = "WhatsAppSendError";
+  }
+}
+
 export async function sendWhatsAppMessage(
   to: string,
   text: string,
   chatId: string,
   source: "manual" | "quick_reply" = "manual",
-  replyContext?: ReplyContext
+  replyContext?: ReplyContext,
+  clientMessageId: string = crypto.randomUUID()
 ) {
   if (!API_URL) {
     throw new Error("AWS API URL is not configured.");
@@ -55,6 +63,7 @@ export async function sendWhatsAppMessage(
         to,
         text,
         chatId,
+        clientMessageId,
         source,
         ...(replyContext ? {
           ...replyContext,
@@ -67,11 +76,14 @@ export async function sendWhatsAppMessage(
   const result = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(result.error || "Message could not be sent.");
+    throw new WhatsAppSendError(
+      result.error || "Message could not be sent.",
+      result.retryable !== false
+    );
   }
 
-    return result;
-  }
+  return result as { success: boolean; messageId?: string; pending?: boolean };
+}
 
   export async function updateWhatsAppMessageState(
     chatId: string,
@@ -270,7 +282,8 @@ export async function sendWhatsAppAttachment(
   source: "manual" | "quick_reply",
   signal: AbortSignal,
   onProgress: (progress: number) => void,
-  replyContext?: ReplyContext
+  replyContext?: ReplyContext,
+  clientMessageId: string = crypto.randomUUID()
 ) {
   if (!API_URL) throw new Error("AWS API URL is not configured.");
   const type = validateWhatsAppAttachment(file);
@@ -307,6 +320,7 @@ export async function sendWhatsAppAttachment(
     mimeType: file.type,
     filename: file.name,
     caption: caption.trim(),
+    clientMessageId,
     source,
     ...(replyContext ? {
       ...replyContext,
@@ -315,7 +329,7 @@ export async function sendWhatsAppAttachment(
     fileBase64,
   });
 
-  return new Promise<{ success: boolean; messageId: string }>((resolve, reject) => {
+  return new Promise<{ success: boolean; messageId?: string; pending?: boolean }>((resolve, reject) => {
     const request = new XMLHttpRequest();
     const endpoint = `${API_URL.replace(/\/$/, "")}/send-media`;
     request.open("POST", endpoint);
@@ -327,7 +341,13 @@ export async function sendWhatsAppAttachment(
     request.onerror = () => reject(new Error("Network error while uploading attachment."));
     request.onabort = () => reject(new DOMException("Upload cancelled.", "AbortError"));
     request.onload = () => {
-      let result: { success?: boolean; messageId?: string; error?: string } = {};
+      let result: {
+        success?: boolean;
+        messageId?: string;
+        pending?: boolean;
+        error?: string;
+        retryable?: boolean;
+      } = {};
       try {
         result = JSON.parse(request.responseText);
       } catch {
@@ -335,14 +355,21 @@ export async function sendWhatsAppAttachment(
         return;
       }
       if (request.status < 200 || request.status >= 300) {
-        reject(new Error(result.error || "Attachment could not be sent."));
+        reject(new WhatsAppSendError(
+          result.error || "Attachment could not be sent.",
+          result.retryable !== false
+        ));
         return;
       }
-      if (!result.success || !result.messageId) {
+      if (!result.success || (!result.messageId && !result.pending)) {
         reject(new Error("The server did not confirm the attachment send."));
         return;
       }
-      resolve({ success: true, messageId: result.messageId });
+      resolve({
+        success: true,
+        messageId: result.messageId,
+        pending: result.pending,
+      });
     };
     signal.addEventListener("abort", () => request.abort(), { once: true });
     request.send(body);

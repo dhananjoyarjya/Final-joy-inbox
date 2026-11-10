@@ -21,14 +21,15 @@ export interface ChatMessage {
   direction: "incoming" | "outgoing";
   type: string;
   text: string;
-  timestamp: Timestamp | null;
+  timestamp: Timestamp | Date | null;
   mediaId?: string | null;
   mediaStoragePath?: string | null;
   mediaMimeType?: string | null;
   mediaSize?: number | null;
   mediaFilename?: string | null;
   mediaDownloadError?: string | null;
-  status?: "received" | "sent" | "delivered" | "read" | "failed" | "unknown";
+  status?: "received" | "sending" | "sent" | "delivered" | "read" | "failed" | "unknown";
+  clientMessageId?: string;
   source?: "manual" | "quick_reply" | "whatsapp" | "webhook";
   sender?: string;
   pinned?: boolean;

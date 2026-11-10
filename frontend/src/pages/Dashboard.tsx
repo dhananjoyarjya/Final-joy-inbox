@@ -126,6 +126,7 @@ function phoneDigits(value: string): string {
 }
 
 function statusLabel(status?: ChatMessage["status"]): string {
+  if (status === "sending") return "Sending…";
   if (status === "delivered") return "Delivered";
   if (status === "read") return "Read";
   if (status === "failed") return "Failed";
@@ -177,7 +178,7 @@ export default function Dashboard() {
   const [hasOlderChats, setHasOlderChats] = useState(false);
   const [loadingOlderChats, setLoadingOlderChats] = useState(false);
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [optimisticMessages, setOptimisticMessages] = useState<ChatMessage[]>([]);
   const [pinnedMessages, setPinnedMessages] = useState<ChatMessage[]>([]);
   const [recentMessages, setRecentMessages] = useState<ChatMessage[]>([]);
   const [olderMessages, setOlderMessages] = useState<ChatMessage[]>([]);
@@ -237,6 +238,14 @@ export default function Dashboard() {
   const [greetingSaving, setGreetingSaving] = useState(false);
   const [greetingError, setGreetingError] = useState("");
   const [greetingSaved, setGreetingSaved] = useState(false);
+  const messageDraftRef = useRef(message);
+  const messageSourceRef = useRef(messageSource);
+  const attachmentDraftRef = useRef(attachment);
+  const replyDraftRef = useRef(replyTo);
+  messageDraftRef.current = message;
+  messageSourceRef.current = messageSource;
+  attachmentDraftRef.current = attachment;
+  replyDraftRef.current = replyTo;
   const uploadController = useRef<AbortController | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const conversationPanelRef = useRef<HTMLElement>(null);
@@ -251,11 +260,30 @@ export default function Dashboard() {
   const messageElements = useRef(new Map<string, HTMLDivElement>());
   const selectionMenuRef = useRef<HTMLDivElement>(null);
   const pendingQuotedMessageId = useRef<string | null>(null);
+  const pendingSendAttempts = useRef(new Map<string, string>());
+  const attachmentRequestIds = useRef(new WeakMap<File, string>());
   const selectedChatId = useRef<string | null>(selectedChat?.id || null);
   const suppressMessageClick = useRef<string | null>(null);
   const pendingChatDeletionIds = useRef<Set<string>>(new Set());
   const slashKeyHandler = useRef<((key: string) => boolean) | null>(null);
   selectedChatId.current = selectedChat?.id || null;
+
+  const messages = useMemo(() => {
+    if (!selectedChat) return [];
+    const allMessages = new Map<string, ChatMessage>();
+    for (const item of [...optimisticMessages, ...olderMessages, ...recentMessages]) {
+      if (item.chatId && item.chatId !== selectedChat.id) continue;
+      const key = item.clientMessageId
+        ? `client:${item.clientMessageId}`
+        : `document:${item.id || item.messageId}`;
+      allMessages.set(key, item);
+    }
+    return [...allMessages.values()].sort((a, b) => {
+      const aTime = asDate(a.timestamp)?.getTime() || 0;
+      const bTime = asDate(b.timestamp)?.getTime() || 0;
+      return aTime - bTime || (a.id || a.messageId).localeCompare(b.id || b.messageId);
+    });
+  }, [olderMessages, optimisticMessages, recentMessages, selectedChat?.id]);
 
   function registerSlashKeyHandler(handler: ((key: string) => boolean) | null) {
     slashKeyHandler.current = handler;
@@ -442,7 +470,6 @@ export default function Dashboard() {
   useEffect(() => {
     pendingQuotedMessageId.current = null;
     if (!selectedChat?.id) {
-      setMessages([]);
       setRecentMessages([]);
       setOlderMessages([]);
       setPinnedMessages([]);
@@ -485,17 +512,21 @@ export default function Dashboard() {
   }, [selectedChat?.id]);
 
   useEffect(() => {
-    const allMessages = new Map<string, ChatMessage>();
-    for (const item of [...olderMessages, ...recentMessages]) {
-      allMessages.set(item.id || item.messageId, item);
+    const confirmedClientIds = new Set(
+      recentMessages
+        .map((item) => item.clientMessageId)
+        .filter((id): id is string => Boolean(id))
+    );
+    if (!confirmedClientIds.size) return;
+    setOptimisticMessages((current) =>
+      current.filter((item) => !item.clientMessageId || !confirmedClientIds.has(item.clientMessageId))
+    );
+    for (const [fingerprint, clientMessageId] of pendingSendAttempts.current) {
+      if (confirmedClientIds.has(clientMessageId)) {
+        pendingSendAttempts.current.delete(fingerprint);
+      }
     }
-    const ordered = [...allMessages.values()].sort((a, b) => {
-      const aTime = asDate(a.timestamp)?.getTime() || 0;
-      const bTime = asDate(b.timestamp)?.getTime() || 0;
-      return aTime - bTime || (a.id || a.messageId).localeCompare(b.id || b.messageId);
-    });
-    setMessages(ordered);
-  }, [olderMessages, recentMessages]);
+  }, [recentMessages]);
 
   useEffect(() => {
     const messageId = pendingQuotedMessageId.current;
@@ -1290,49 +1321,141 @@ export default function Dashboard() {
     event.preventDefault();
     if (!selectedChat || (!message.trim() && !attachment) || sending) return;
     playSendSound();
+    const chat = selectedChat;
     const text = message.trim();
-    const replyContext = getReplyContext(replyTo, selectedChat);
+    const currentAttachment = attachment;
+    const currentSource = messageSource;
+    const currentReplyTo = replyTo;
+    const replyContext = getReplyContext(currentReplyTo, chat);
+    let attachmentRequestId: string | null = null;
+    if (currentAttachment) {
+      attachmentRequestId = attachmentRequestIds.current.get(currentAttachment) || crypto.randomUUID();
+      attachmentRequestIds.current.set(currentAttachment, attachmentRequestId);
+    }
+    const fingerprint = JSON.stringify({
+      chatId: chat.id,
+      text,
+      source: currentSource,
+      attachment: attachmentRequestId,
+      replyToMessageId: replyContext?.replyToMessageId || null
+    });
+    const clientMessageId = pendingSendAttempts.current.get(fingerprint) || crypto.randomUUID();
+    pendingSendAttempts.current.set(fingerprint, clientMessageId);
+    const optimisticMessage: ChatMessage = {
+      id: clientMessageId,
+      messageId: clientMessageId,
+      clientMessageId,
+      chatId: chat.id,
+      direction: "outgoing",
+      type: currentAttachment ? validateWhatsAppAttachment(currentAttachment) : "text",
+      text,
+      timestamp: new Date(),
+      status: "sending",
+      source: currentSource,
+      sender: "owner",
+      ...(currentAttachment ? {
+        mediaFilename: currentAttachment.name,
+        mediaMimeType: currentAttachment.type,
+        mediaSize: currentAttachment.size
+      } : {}),
+      ...(replyContext ? {
+        replyToMessageId: replyContext.replyToMessageId,
+        replyToMessageText: replyContext.replyToMessageText,
+        replyToMessageSender: replyContext.replyToMessageSender,
+        replyToMessageType: replyContext.replyToMessageType
+      } : {})
+    };
+    setOptimisticMessages((current) => [
+      ...current.filter((item) => item.clientMessageId !== clientMessageId),
+      optimisticMessage
+    ]);
+    setShowPinnedMessages(false);
+    const startedAt = performance.now();
+    window.requestAnimationFrame(() => {
+      console.info(JSON.stringify({
+        metric: "frontend_optimistic_render_ms",
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt))
+      }));
+    });
     setSending(true);
     setError("");
     try {
-      if (attachment) {
+      let result: { success: boolean; messageId?: string; pending?: boolean };
+      if (currentAttachment) {
         uploadController.current = new AbortController();
-        await sendWhatsAppAttachment(
-          selectedChat.customerPhone,
-          selectedChat.id,
-          attachment,
+        result = await sendWhatsAppAttachment(
+          chat.customerPhone,
+          chat.id,
+          currentAttachment,
           text,
-          messageSource,
+          currentSource,
           uploadController.current.signal,
           setUploadProgress,
-          replyContext
+          replyContext,
+          clientMessageId
         );
-        setAttachment(null);
-        if (fileInput.current) fileInput.current.value = "";
       } else {
-        await sendWhatsAppMessage(
-          selectedChat.customerPhone,
+        result = await sendWhatsAppMessage(
+          chat.customerPhone,
           text,
-          selectedChat.id,
-          messageSource,
-          replyContext
+          chat.id,
+          currentSource,
+          replyContext,
+          clientMessageId
         );
       }
-      setMessage("");
-      setMessageSource("manual");
-      setSlashQuery(null);
-      setReplyTo(null);
+      console.info(JSON.stringify({
+        metric: "frontend_send_elapsed_ms",
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        media: Boolean(currentAttachment),
+        pending: Boolean(result.pending)
+      }));
+      setOptimisticMessages((current) =>
+        current.map((item) => item.clientMessageId === clientMessageId
+          ? {
+              ...item,
+              ...(result.messageId ? { messageId: result.messageId } : {}),
+              status: "sending"
+            }
+          : item)
+      );
+      if (messageDraftRef.current === text && messageSourceRef.current === currentSource) {
+        setMessage("");
+        setMessageSource("manual");
+        setSlashQuery(null);
+      }
+      if (currentReplyTo?.messageId === replyDraftRef.current?.messageId) {
+        setReplyTo(null);
+      }
+      if (currentAttachment && attachmentDraftRef.current === currentAttachment) {
+        setAttachment(null);
+        if (fileInput.current) fileInput.current.value = "";
+      }
+      if (!result.pending) pendingSendAttempts.current.delete(fingerprint);
     } catch (sendError) {
       if (sendError instanceof DOMException && sendError.name === "AbortError") {
         setError("Attachment upload cancelled.");
-        return;
+      } else {
+        console.error("Message send failed:", sendError);
+        const retryable =
+          sendError instanceof Error &&
+          "retryable" in sendError &&
+          sendError.retryable === false
+            ? false
+            : true;
+        if (!retryable) {
+          setOptimisticMessages((current) =>
+            current.map((item) => item.clientMessageId === clientMessageId
+              ? { ...item, status: "failed" }
+              : item)
+          );
+        }
+        setError(retryable
+          ? "Delivery is not confirmed. Retry this send to check its status safely."
+          : sendError instanceof Error
+            ? sendError.message
+            : "Message could not be sent.");
       }
-      console.error("Message send failed:", sendError);
-      setError(
-        sendError instanceof Error
-          ? sendError.message
-          : "Message was not sent. Check the WhatsApp connection and retry."
-      );
     } finally {
       setSending(false);
       setUploadProgress(0);
@@ -2030,7 +2153,9 @@ export default function Dashboard() {
                               </button>
                             )}
                             {item.pinned && <span className="message-pinned-indicator"><Pin size={12} />Pinned</span>}
-                            {item.mediaStoragePath || item.mediaId ? (
+                            {item.status === "sending" && item.type !== "text" ? (
+                              <p className="media-unavailable">{item.mediaFilename || `${item.type} attachment`} · Sending</p>
+                            ) : item.mediaStoragePath || item.mediaId ? (
                               <MessageMedia chatId={selectedChat.id} message={item} />
                             ) : item.type !== "text" ? (
                               <p className="media-unavailable">{item.mediaDownloadError || `${item.type} attachment is unavailable.`}</p>
@@ -2040,6 +2165,7 @@ export default function Dashboard() {
                               <time>{formatTime(item.timestamp)}</time>
                               {outgoing && statusLabel(item.status) && (
                                 <span className={item.status === "failed" ? "failed-status" : ""}>
+                                  {item.status === "sending" ? <Loader2 className="spin" size={13} /> : null}
                                   {item.status === "read" || item.status === "delivered" ? <CheckCheck size={14} /> : null}
                                   {statusLabel(item.status)}
                                 </span>
