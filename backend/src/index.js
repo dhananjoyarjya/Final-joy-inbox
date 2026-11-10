@@ -26,6 +26,7 @@ const {
   validateMedia
 } = require("./media");
 const { OWNER_UID } = require("./owner");
+const { resolveReplyContext, getReplyMessageFields } = require("./replies");
 const {
   getDeviceDocument,
   isValidFcmToken,
@@ -167,29 +168,13 @@ async function sendMessage(event) {
     });
   }
   const db = getDb();
-  const contextMessageId = body.contextMessageId;
-  let contextMessageData = null;
-  if (
-    contextMessageId !== undefined &&
-    (typeof contextMessageId !== "string" ||
-      !/^[A-Za-z0-9._:-]{1,256}$/.test(contextMessageId))
-  ) {
-    return jsonResponse(event, 400, { error: "A valid reply message ID is required." });
-  }
-  if (contextMessageId) {
-    const contextSnapshot = await db
-      .collection("chats")
-      .doc(chatId)
-      .collection("messages")
-      .doc(contextMessageId)
-      .get();
-    if (!contextSnapshot.exists) {
-      return jsonResponse(event, 404, { error: "The message being replied to was not found." });
-    }
-    contextMessageData = contextSnapshot.data();
-  }
+  const replyContext = await resolveReplyContext(db, chatId, body);
 
-  const result = await sendWhatsAppText(to, messageText, contextMessageId);
+  const result = await sendWhatsAppText(
+    to,
+    messageText,
+    replyContext?.contextMessageId
+  );
 
   const chatRef = db.collection("chats").doc(chatId);
   const messageRef = chatRef
@@ -210,14 +195,7 @@ async function sendMessage(event) {
       source: body.source === "quick_reply"
         ? "quick_reply"
         : "manual",
-      ...(contextMessageId ? {
-        replyToMessageId: contextMessageId,
-        replyToMessageText: String(contextMessageData.text || ""),
-        replyToMessageSender: contextMessageData.direction === "outgoing"
-          ? "You"
-          : String(contextMessageData.sender || chatId),
-        replyToMessageType: String(contextMessageData.type || "unknown")
-      } : {}),
+      ...getReplyMessageFields(replyContext),
       sender: "owner"
     });
 
@@ -494,27 +472,8 @@ async function sendMediaMessage(event) {
     return jsonResponse(event, 400, { error: "Valid matching to and chatId values are required." });
   }
 
-  const contextMessageId = body.contextMessageId;
-  let contextMessageData = null;
-  if (
-    contextMessageId !== undefined &&
-    (typeof contextMessageId !== "string" ||
-      !/^[A-Za-z0-9._:-]{1,256}$/.test(contextMessageId))
-  ) {
-    return jsonResponse(event, 400, { error: "A valid reply message ID is required." });
-  }
-  if (contextMessageId) {
-    const contextSnapshot = await getDb()
-      .collection("chats")
-      .doc(chatId)
-      .collection("messages")
-      .doc(contextMessageId)
-      .get();
-    if (!contextSnapshot.exists) {
-      return jsonResponse(event, 404, { error: "The message being replied to was not found." });
-    }
-    contextMessageData = contextSnapshot.data();
-  }
+  const db = getDb();
+  const replyContext = await resolveReplyContext(db, chatId, body);
 
   const encoded = String(body.fileBase64 || "");
   const maxEncodedLength = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4;
@@ -572,7 +531,7 @@ async function sendMediaMessage(event) {
       uploaded.mediaId,
       caption,
       filename,
-      contextMessageId
+      replyContext?.contextMessageId
     );
   } catch (error) {
     await deleteMessageMedia(stored.storagePath).catch((cleanupError) => {
@@ -581,7 +540,6 @@ async function sendMediaMessage(event) {
     throw error;
   }
 
-  const db = getDb();
   const chatRef = db.collection("chats").doc(chatId);
   const messageRef = chatRef.collection("messages").doc(result.messageId);
   const timestamp = new Date();
@@ -598,14 +556,7 @@ async function sendMediaMessage(event) {
       status: "sent",
       source: body.source === "quick_reply" ? "quick_reply" : "manual",
       sender: "owner",
-      ...(contextMessageId ? {
-        replyToMessageId: contextMessageId,
-        replyToMessageText: String(contextMessageData.text || ""),
-        replyToMessageSender: contextMessageData.direction === "outgoing"
-          ? "You"
-          : String(contextMessageData.sender || chatId),
-        replyToMessageType: String(contextMessageData.type || "unknown")
-      } : {}),
+      ...getReplyMessageFields(replyContext),
       mediaId: uploaded.mediaId,
       mediaStoragePath: stored.storagePath,
       mediaMimeType: stored.mimeType,

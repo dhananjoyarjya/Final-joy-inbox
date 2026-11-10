@@ -88,6 +88,7 @@ async function saveIncomingMessage(message, contactName) {
       ? message.context.id
       : "";
   let contextMessageData = null;
+  let replyToMessageDocumentId = contextMessageId;
   if (contextMessageId) {
     const contextSnapshot = await db
       .collection("chats")
@@ -95,7 +96,10 @@ async function saveIncomingMessage(message, contactName) {
       .collection("messages")
       .doc(contextMessageId)
       .get();
-    if (contextSnapshot.exists) contextMessageData = contextSnapshot.data();
+    if (contextSnapshot.exists) {
+      contextMessageData = contextSnapshot.data();
+      replyToMessageDocumentId = contextSnapshot.id;
+    }
   }
   const deletedChatRef = db.collection("deletedChats").doc(phone);
   const deletionSnapshot = await deletedChatRef.get();
@@ -179,7 +183,7 @@ async function saveIncomingMessage(message, contactName) {
       mediaSha256: media?.sha256 || null,
       mediaDownloadError: mediaError || null,
       ...(contextMessageId ? {
-        replyToMessageId: contextMessageId,
+        replyToMessageId: replyToMessageDocumentId,
         replyToMessageText: String(contextMessageData?.text || ""),
         replyToMessageSender: contextMessageData?.direction === "outgoing"
           ? "You"

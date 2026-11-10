@@ -1,5 +1,6 @@
 
 import { auth } from "../firebase/config";
+import type { ReplyContext } from "../types";
 
 const API_URL = import.meta.env.VITE_API_BASE_URL;
 const MAX_MEDIA_BYTES = 3 * 1024 * 1024;
@@ -28,7 +29,7 @@ export async function sendWhatsAppMessage(
   text: string,
   chatId: string,
   source: "manual" | "quick_reply" = "manual",
-  contextMessageId?: string
+  replyContext?: ReplyContext
 ) {
   if (!API_URL) {
     throw new Error("AWS API URL is not configured.");
@@ -55,7 +56,10 @@ export async function sendWhatsAppMessage(
         text,
         chatId,
         source,
-        ...(contextMessageId ? { contextMessageId } : {}),
+        ...(replyContext ? {
+          ...replyContext,
+          contextMessageId: replyContext.replyToMessageId,
+        } : {}),
       }),
     }
   );
@@ -266,7 +270,7 @@ export async function sendWhatsAppAttachment(
   source: "manual" | "quick_reply",
   signal: AbortSignal,
   onProgress: (progress: number) => void,
-  contextMessageId?: string
+  replyContext?: ReplyContext
 ) {
   if (!API_URL) throw new Error("AWS API URL is not configured.");
   const type = validateWhatsAppAttachment(file);
@@ -304,7 +308,10 @@ export async function sendWhatsAppAttachment(
     filename: file.name,
     caption: caption.trim(),
     source,
-    ...(contextMessageId ? { contextMessageId } : {}),
+    ...(replyContext ? {
+      ...replyContext,
+      contextMessageId: replyContext.replyToMessageId,
+    } : {}),
     fileBase64,
   });
 

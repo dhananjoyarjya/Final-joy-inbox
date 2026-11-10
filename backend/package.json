@@ -5,6 +5,9 @@
   "description": "Joy Inbox WhatsApp Cloud API backend",
   "main": "src/index.js",
   "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
     "node": "22.x"
   },

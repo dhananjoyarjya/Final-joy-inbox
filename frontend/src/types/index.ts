@@ -30,11 +30,19 @@ export interface ChatMessage {
   mediaDownloadError?: string | null;
   status?: "received" | "sent" | "delivered" | "read" | "failed" | "unknown";
   source?: "manual" | "quick_reply" | "whatsapp" | "webhook";
+  sender?: string;
   pinned?: boolean;
   replyToMessageId?: string;
   replyToMessageText?: string;
   replyToMessageSender?: string;
   replyToMessageType?: string;
+}
+
+export interface ReplyContext {
+  replyToMessageId: string;
+  replyToMessageText: string;
+  replyToMessageSender: string;
+  replyToMessageType: string;
 }
 
 export interface QuickReply {

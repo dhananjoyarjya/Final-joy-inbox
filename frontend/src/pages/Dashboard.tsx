@@ -57,6 +57,7 @@ import {
   enablePushNotifications,
   syncPushToken,
 } from "../services/pushNotifications";
+import { listenToContacts } from "../services/contacts";
 import {
   sendWhatsAppMessage,
   sendWhatsAppAttachment,
@@ -70,13 +71,14 @@ import {
   saveGreetingSettings,
 } from "../services/whatsapp";
 import QuickReplies from "../components/QuickReplies";
-import type { Chat, ChatMessage } from "../types";
+import type { Chat, ChatMessage, Contact, ReplyContext } from "../types";
 import type { DocumentData, QueryDocumentSnapshot } from "firebase/firestore";
 
 type View = "chats" | "contacts" | "replies" | "archived" | "settings";
 type ChatFilter = "all" | "unread" | "pinned";
 type Theme = "light" | "dark" | "system";
 type MessageActionMenu = { message: ChatMessage; x: number; y: number };
+type ReplyTarget = { message: ChatMessage; messageId: string };
 type MessageSwipe = { messageId: string; offset: number; active: boolean; triggered: boolean };
 type MessageSwipeGesture = {
   messageId: string;
@@ -116,6 +118,10 @@ function displayName(chat: Chat): string {
   return chat.customerName && chat.customerName !== chat.customerPhone
     ? chat.customerName
     : chat.customerPhone;
+}
+
+function phoneDigits(value: string): string {
+  return value.replace(/\D/g, "");
 }
 
 function statusLabel(status?: ChatMessage["status"]): string {
@@ -185,10 +191,14 @@ export default function Dashboard() {
   const [showPinnedMessages, setShowPinnedMessages] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
   const [messageActionMenu, setMessageActionMenu] = useState<MessageActionMenu | null>(null);
-  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
   const [messageSwipe, setMessageSwipe] = useState<MessageSwipe | null>(null);
   const [forwardMessageIds, setForwardMessageIds] = useState<string[] | null>(null);
   const [forwardingMessages, setForwardingMessages] = useState(false);
+  const [forwardSearch, setForwardSearch] = useState("");
+  const [forwardContacts, setForwardContacts] = useState<Contact[]>([]);
+  const [forwardContactsLoading, setForwardContactsLoading] = useState(false);
+  const [forwardContactsError, setForwardContactsError] = useState("");
   const [deletingMessages, setDeletingMessages] = useState(false);
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -525,6 +535,30 @@ export default function Dashboard() {
     };
   }, [user?.uid, view]);
 
+  useEffect(() => {
+    if (!forwardMessageIds || !user?.uid) {
+      setForwardContacts([]);
+      setForwardContactsLoading(false);
+      setForwardContactsError("");
+      return;
+    }
+
+    setForwardContactsLoading(true);
+    setForwardContactsError("");
+    return listenToContacts(
+      user.uid,
+      (items) => {
+        setForwardContacts(items);
+        setForwardContactsLoading(false);
+      },
+      (listenerError) => {
+        console.error("Forward recipient contacts listener failed:", listenerError);
+        setForwardContactsError("Saved contact names could not be loaded.");
+        setForwardContactsLoading(false);
+      }
+    );
+  }, [forwardMessageIds, user?.uid]);
+
   const visibleChats = useMemo(() => {
     const term = search.trim().toLocaleLowerCase();
     return chats.filter((chat) => {
@@ -542,6 +576,33 @@ export default function Dashboard() {
       );
     }).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
   }, [chats, filter, search, view]);
+
+  const forwardContactsByPhone = useMemo(() => {
+    const contactsByPhone = new Map<string, Contact>();
+    forwardContacts.forEach((contact) => {
+      const phone = phoneDigits(contact.phone);
+      if (phone) contactsByPhone.set(phone, contact);
+    });
+    return contactsByPhone;
+  }, [forwardContacts]);
+
+  const forwardRecipients = useMemo(() => {
+    const term = forwardSearch.trim().toLocaleLowerCase();
+    const numberTerm = phoneDigits(forwardSearch);
+    return chats.filter((chat) => {
+      if (chat.archived) return false;
+      if (!term) return true;
+
+      const savedContact = forwardContactsByPhone.get(phoneDigits(chat.customerPhone));
+      const names = `${chat.customerName} ${savedContact?.name || ""}`.toLocaleLowerCase();
+      const phone = chat.customerPhone.toLocaleLowerCase();
+      return (
+        names.includes(term) ||
+        phone.includes(term) ||
+        Boolean(numberTerm && phoneDigits(chat.customerPhone).includes(numberTerm))
+      );
+    });
+  }, [chats, forwardContactsByPhone, forwardSearch]);
 
   const visibleMessages = useMemo(() => {
     const source = showPinnedMessages ? pinnedMessages : messages;
@@ -875,10 +936,23 @@ export default function Dashboard() {
   }
 
   function beginReply(item: ChatMessage) {
-    setReplyTo(item);
+    setReplyTo({ message: item, messageId: getMessageDocumentId(item) });
     setMessageSource("manual");
     setMessageActionMenu(null);
     window.setTimeout(() => composerInputRef.current?.focus(), 0);
+  }
+
+  function getReplyContext(target: ReplyTarget | null, chat: Chat): ReplyContext | undefined {
+    if (!target) return undefined;
+    const original = target.message;
+    return {
+      replyToMessageId: target.messageId,
+      replyToMessageText: original.text || "",
+      replyToMessageSender: original.direction === "outgoing"
+        ? "You"
+        : original.sender || chat.customerPhone,
+      replyToMessageType: original.type || "unknown",
+    };
   }
 
   async function openQuotedMessage(messageId: string) {
@@ -933,6 +1007,7 @@ export default function Dashboard() {
       return;
     }
     setMessageActionMenu(null);
+    setForwardSearch("");
     setForwardMessageIds(messageIds);
   }
 
@@ -1168,6 +1243,7 @@ export default function Dashboard() {
     if (!selectedChat || (!message.trim() && !attachment) || sending) return;
     playSendSound();
     const text = message.trim();
+    const replyContext = getReplyContext(replyTo, selectedChat);
     setSending(true);
     setError("");
     try {
@@ -1181,7 +1257,7 @@ export default function Dashboard() {
           messageSource,
           uploadController.current.signal,
           setUploadProgress,
-          replyTo?.messageId
+          replyContext
         );
         setAttachment(null);
         if (fileInput.current) fileInput.current.value = "";
@@ -1191,7 +1267,7 @@ export default function Dashboard() {
           text,
           selectedChat.id,
           messageSource,
-          replyTo?.messageId
+          replyContext
         );
       }
       setMessage("");
@@ -1874,7 +1950,7 @@ export default function Dashboard() {
                 {replyTo && (
                   <div className="reply-composer-banner">
                     <Reply size={16} />
-                    <span><strong>Replying to {replyTo.direction === "outgoing" ? "your message" : displayName(selectedChat)}</strong>{replyTo.text || `${replyTo.type} message`}</span>
+                    <span><strong>Replying to {replyTo.message.direction === "outgoing" ? "your message" : displayName(selectedChat)}</strong>{replyTo.message.text || `${replyTo.message.type} message`}</span>
                     <button type="button" onClick={() => setReplyTo(null)} aria-label="Cancel reply"><X size={17} /></button>
                   </div>
                 )}
@@ -2075,21 +2151,61 @@ export default function Dashboard() {
             <p className="helper-text">
               Selected text will be sent as new messages. WhatsApp Cloud API does not forward media or mark these as forwarded.
             </p>
-            <div className="message-forward-destinations">
-              {chats.filter((chat) => !chat.archived).map((chat) => (
+            <div className="message-forward-search">
+              <Search size={18} aria-hidden="true" />
+              <input
+                type="text"
+                value={forwardSearch}
+                onChange={(event) => setForwardSearch(event.target.value)}
+                placeholder="Search name or number"
+                aria-label="Search recipients by name or number"
+                autoComplete="off"
+              />
+              {forwardSearch && (
                 <button
                   type="button"
-                  key={chat.id}
-                  disabled={forwardingMessages}
-                  onClick={() => void forwardMessagesToChat(chat)}
+                  className="message-forward-search-clear"
+                  aria-label="Clear recipient search"
+                  onClick={() => setForwardSearch("")}
                 >
-                  <span className="avatar">{initials(chat.customerName, chat.customerPhone)}</span>
-                  <span>{displayName(chat)}</span>
-                  {forwardingMessages && <Loader2 className="spin" size={16} />}
+                  <X size={16} />
                 </button>
-              ))}
-              {chats.every((chat) => chat.archived) && <p>No active conversations are available.</p>}
+              )}
             </div>
+            <div className="message-forward-destinations">
+              {forwardRecipients.map((chat) => {
+                const savedContact = forwardContactsByPhone.get(phoneDigits(chat.customerPhone));
+                const chatName = displayName(chat);
+                const recipientName =
+                  chatName === chat.customerPhone && savedContact?.name
+                    ? savedContact.name
+                    : chatName;
+                return (
+                  <button
+                    type="button"
+                    key={chat.id}
+                    disabled={forwardingMessages}
+                    onClick={() => void forwardMessagesToChat(chat)}
+                  >
+                    <span className="avatar">{initials(recipientName, chat.customerPhone)}</span>
+                    <span>{recipientName}</span>
+                    {forwardingMessages && <Loader2 className="spin" size={16} />}
+                  </button>
+                );
+              })}
+              {forwardRecipients.length === 0 && (
+                <p>
+                  {forwardContactsLoading
+                    ? "Loading contacts…"
+                    : forwardSearch.trim()
+                      ? "No contacts found."
+                      : chats.some((chat) => !chat.archived)
+                        ? "No contacts found."
+                        : "No active conversations are available."}
+                </p>
+              )}
+            </div>
+            {forwardContactsError && <p className="contacts-error" role="alert">{forwardContactsError}</p>}
             {error && <p className="contacts-error" role="alert">{error}</p>}
           </section>
         </div>
