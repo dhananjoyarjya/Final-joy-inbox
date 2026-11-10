@@ -8,6 +8,8 @@ type Props = {
   search: string;
   chats: Chat[];
   onOpenChat: (chat: Chat) => void;
+  contactRequest: { name: string; phone: string } | null;
+  onContactRequestHandled: () => void;
 };
 
 type ContactForm = { name: string; phone: string; email: string; notes: string };
@@ -17,7 +19,14 @@ function phoneKey(value: string) {
   return value.replace(/\D/g, "");
 }
 
-export default function ContactsPanel({ userId, search, chats, onOpenChat }: Props) {
+export default function ContactsPanel({
+  userId,
+  search,
+  chats,
+  onOpenChat,
+  contactRequest,
+  onContactRequestHandled,
+}: Props) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -72,6 +81,22 @@ export default function ContactsPanel({ userId, search, chats, onOpenChat }: Pro
     });
     setError("");
   }
+
+  useEffect(() => {
+    if (!contactRequest || loading) return;
+    const existing = contacts.find(
+      (contact) => phoneKey(contact.phone) === phoneKey(contactRequest.phone)
+    );
+    if (existing) {
+      startEdit(existing);
+    } else {
+      setEditing(null);
+      setForm({ ...emptyForm, name: contactRequest.name, phone: contactRequest.phone });
+      setFormOpen(true);
+      setError("");
+    }
+    onContactRequestHandled();
+  }, [contactRequest, contacts, loading, onContactRequestHandled]);
 
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

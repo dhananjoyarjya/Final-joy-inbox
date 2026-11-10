@@ -1005,83 +1005,67 @@ select:focus-visible {
 }
 
 .message-selection-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
+  position: relative;
+  z-index: 4;
   display: flex;
-  min-height: 46px;
+  min-height: 64px;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
-  margin: -7px 0 4px;
-  padding: 5px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--surface-primary) 94%, transparent);
-  box-shadow: 0 4px 16px #00000012;
-  backdrop-filter: blur(12px);
+  gap: 6px;
 }
 
 .message-selection-toolbar strong {
   flex: 1;
-  font-size: 12px;
+  font-size: 15px;
 }
 
-.message-selection-toolbar button {
-  display: inline-flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 0 9px;
+.message-selection-toolbar .selection-cancel,
+.message-selection-toolbar .selection-action {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  place-items: center;
   border: 0;
-  border-radius: 8px;
+  border-radius: 50%;
   background: transparent;
-  color: var(--primary-text);
-  font-size: 11px;
-}
-
-.message-selection-toolbar button:hover:not(:disabled) {
-  background: var(--surface-hover);
-}
-
-.message-selection-toolbar button:disabled {
-  opacity: 0.45;
-}
-
-.message-selection-toolbar .selection-cancel {
-  width: 34px;
-  padding: 0;
   color: var(--secondary-text);
 }
 
-.message-action-backdrop {
-  position: fixed;
-  z-index: 75;
-  inset: 0;
-  background: transparent;
+.message-selection-toolbar .selection-cancel:hover,
+.message-selection-toolbar .selection-action:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--primary-text);
 }
 
-.message-action-menu {
-  position: fixed;
+.message-selection-toolbar .selection-action:disabled {
+  opacity: 0.45;
+}
+
+.selection-overflow {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.selection-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
   z-index: 76;
   display: flex;
-  width: 236px;
-  max-height: min(70vh, 480px);
+  width: 224px;
   flex-direction: column;
   gap: 2px;
-  overflow-y: auto;
   padding: 6px;
   border: 1px solid var(--border-color);
   border-radius: 12px;
   background: var(--surface-primary);
-  box-shadow: 0 14px 42px #0003;
-  transform-origin: top left;
+  box-shadow: 0 8px 26px #0002;
 }
 
-.message-action-menu button {
+.selection-overflow-menu button {
   display: flex;
-  min-height: 40px;
+  min-height: 42px;
   flex: 0 0 auto;
   align-items: center;
   gap: 10px;
@@ -1094,21 +1078,21 @@ select:focus-visible {
   text-align: left;
 }
 
-.message-action-menu button:hover:not(:disabled) {
+.selection-overflow-menu button:hover:not(:disabled) {
   background: var(--surface-hover);
 }
 
-.message-action-menu button:disabled {
+.selection-overflow-menu button:disabled {
   opacity: 0.48;
 }
 
-.message-action-menu button svg {
+.selection-overflow-menu button svg {
   flex: 0 0 auto;
   color: var(--secondary-text);
 }
 
-.message-action-note {
-  margin: 4px 5px 2px;
+.selection-menu-note {
+  margin: 3px 5px 2px;
   padding: 8px 4px 2px;
   border-top: 1px solid var(--border-color);
   color: var(--secondary-text);
@@ -2157,38 +2141,22 @@ html[data-theme="dark"] .app-shell [class*="border-gray-"] {
     max-width: 88%;
   }
 
-  .message-action-menu {
-    top: auto !important;
-    right: 10px;
-    bottom: max(10px, env(safe-area-inset-bottom));
-    left: 10px !important;
-    width: auto;
-    max-height: min(68dvh, 560px);
-    padding: 9px;
-    border-radius: 16px;
-    transform-origin: bottom center;
+  .message-selection-toolbar {
+    min-height: 58px;
+    gap: 3px;
+    padding-right: 9px;
+    padding-left: 9px;
   }
 
-  .message-action-menu button {
-    min-height: 46px;
-    padding: 0 12px;
+  .message-selection-toolbar strong {
     font-size: 13px;
   }
 
-  .message-action-note {
-    font-size: 11px;
-  }
-
-  .message-selection-toolbar {
-    gap: 3px;
-    padding-right: 5px;
-    padding-left: 7px;
-  }
-
-  .message-selection-toolbar button {
-    gap: 4px;
-    padding: 0 6px;
-    font-size: 10px;
+  .message-selection-toolbar .selection-cancel,
+  .message-selection-toolbar .selection-action {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
   }
 
   .composer {

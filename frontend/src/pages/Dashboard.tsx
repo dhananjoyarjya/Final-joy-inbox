@@ -24,6 +24,7 @@ import {
   LogOut,
   MessageCircle,
   MessageSquareText,
+  MoreVertical,
   Paperclip,
   Pencil,
   Pin,
@@ -77,7 +78,7 @@ import type { DocumentData, QueryDocumentSnapshot } from "firebase/firestore";
 type View = "chats" | "contacts" | "replies" | "archived" | "settings";
 type ChatFilter = "all" | "unread" | "pinned";
 type Theme = "light" | "dark" | "system";
-type MessageActionMenu = { message: ChatMessage; x: number; y: number };
+type ContactRequest = { name: string; phone: string };
 type ReplyTarget = { message: ChatMessage; messageId: string };
 type MessageSwipe = { messageId: string; offset: number; active: boolean; triggered: boolean };
 type MessageSwipeGesture = {
@@ -190,15 +191,16 @@ export default function Dashboard() {
   const [messageSearch, setMessageSearch] = useState("");
   const [showPinnedMessages, setShowPinnedMessages] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
-  const [messageActionMenu, setMessageActionMenu] = useState<MessageActionMenu | null>(null);
+  const [messageSelectionMenuOpen, setMessageSelectionMenuOpen] = useState(false);
   const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
   const [messageSwipe, setMessageSwipe] = useState<MessageSwipe | null>(null);
   const [forwardMessageIds, setForwardMessageIds] = useState<string[] | null>(null);
   const [forwardingMessages, setForwardingMessages] = useState(false);
   const [forwardSearch, setForwardSearch] = useState("");
   const [forwardContacts, setForwardContacts] = useState<Contact[]>([]);
-  const [forwardContactsLoading, setForwardContactsLoading] = useState(false);
+  const [forwardContactsLoading, setForwardContactsLoading] = useState(true);
   const [forwardContactsError, setForwardContactsError] = useState("");
+  const [contactRequest, setContactRequest] = useState<ContactRequest | null>(null);
   const [deletingMessages, setDeletingMessages] = useState(false);
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -247,6 +249,7 @@ export default function Dashboard() {
   const messageSwipeGesture = useRef<MessageSwipeGesture | null>(null);
   const trackpadSwipe = useRef<TrackpadSwipe | null>(null);
   const messageElements = useRef(new Map<string, HTMLDivElement>());
+  const selectionMenuRef = useRef<HTMLDivElement>(null);
   const pendingQuotedMessageId = useRef<string | null>(null);
   const selectedChatId = useRef<string | null>(selectedChat?.id || null);
   const suppressMessageClick = useRef<string | null>(null);
@@ -270,13 +273,22 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (!messageActionMenu) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMessageActionMenu(null);
+    if (!messageSelectionMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !selectionMenuRef.current?.contains(event.target)) {
+        setMessageSelectionMenuOpen(false);
+      }
     };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMessageSelectionMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [messageActionMenu]);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [messageSelectionMenuOpen]);
 
   useEffect(() => {
     const panel = conversationPanelRef.current;
@@ -536,7 +548,7 @@ export default function Dashboard() {
   }, [user?.uid, view]);
 
   useEffect(() => {
-    if (!forwardMessageIds || !user?.uid) {
+    if (!user?.uid) {
       setForwardContacts([]);
       setForwardContactsLoading(false);
       setForwardContactsError("");
@@ -552,12 +564,12 @@ export default function Dashboard() {
         setForwardContactsLoading(false);
       },
       (listenerError) => {
-        console.error("Forward recipient contacts listener failed:", listenerError);
+        console.error("Saved contacts listener failed:", listenerError);
         setForwardContactsError("Saved contact names could not be loaded.");
         setForwardContactsLoading(false);
       }
     );
-  }, [forwardMessageIds, user?.uid]);
+  }, [user?.uid]);
 
   const visibleChats = useMemo(() => {
     const term = search.trim().toLocaleLowerCase();
@@ -610,6 +622,13 @@ export default function Dashboard() {
     if (!term) return source;
     return source.filter((item) => (item.text || "").toLocaleLowerCase().includes(term));
   }, [messages, messageSearch, pinnedMessages, showPinnedMessages]);
+  const selectedMessages = [...selectedMessageIds]
+    .map(findMessageById)
+    .filter((item): item is ChatMessage => Boolean(item));
+  const selectedMessagesCanCopy = selectedMessages.some((item) => Boolean(item.text?.trim()));
+  const selectedMessagesCanForward =
+    selectedMessages.length === selectedMessageIds.size &&
+    selectedMessages.every((item) => item.type === "text" && Boolean(item.text?.trim()));
 
   async function loadEarlierMessages() {
     if (!selectedChat || !messageCursor || loadingOlderMessages) return;
@@ -656,15 +675,6 @@ export default function Dashboard() {
     );
   }
 
-  function openMessageActionMenu(item: ChatMessage, x: number, y: number) {
-    const menuWidth = 250;
-    setMessageActionMenu({
-      message: item,
-      x: Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8)),
-      y: Math.max(8, Math.min(y, window.innerHeight - 420)),
-    });
-  }
-
   function cancelMessageLongPress() {
     if (messageLongPressTimer.current !== null) {
       window.clearTimeout(messageLongPressTimer.current);
@@ -691,12 +701,7 @@ export default function Dashboard() {
       messageLongPressTimer.current = null;
       messageLongPressPoint.current = null;
       suppressMessageClick.current = getMessageDocumentId(item);
-      setSelectedMessageIds((current) =>
-        current.has(getMessageDocumentId(item))
-          ? current
-          : new Set(current).add(getMessageDocumentId(item))
-      );
-      openMessageActionMenu(item, event.clientX, event.clientY);
+      selectMessage(item);
     }, 500);
   }
 
@@ -851,6 +856,11 @@ export default function Dashboard() {
     });
   }
 
+  function selectMessage(item: ChatMessage) {
+    const id = getMessageDocumentId(item);
+    setSelectedMessageIds((current) => current.has(id) ? current : new Set(current).add(id));
+  }
+
   function handleMessageClick(item: ChatMessage) {
     if (suppressMessageClick.current === getMessageDocumentId(item)) {
       suppressMessageClick.current = null;
@@ -862,23 +872,31 @@ export default function Dashboard() {
 
   function cancelMessageSelection() {
     setSelectedMessageIds(new Set());
-    setMessageActionMenu(null);
+    setMessageSelectionMenuOpen(false);
   }
 
-  async function setMessagePinned(item: ChatMessage) {
-    if (!selectedChat) return;
+  async function setSelectedMessagesPinned(items: ChatMessage[]) {
+    if (!selectedChat || busyAction || !items.length) return;
+    const shouldPin = items.some((item) => !item.pinned);
+    let updatedCount = 0;
     setBusyAction(true);
-    setMessageActionMenu(null);
+    setMessageSelectionMenuOpen(false);
     setError("");
     try {
-      await updateWhatsAppMessageState(
-        selectedChat.id,
-        getMessageDocumentId(item),
-        !item.pinned
-      );
+      for (const item of items) {
+        await updateWhatsAppMessageState(
+          selectedChat.id,
+          getMessageDocumentId(item),
+          shouldPin
+        );
+        updatedCount++;
+      }
     } catch (actionError) {
       console.error("Message pin state update failed:", actionError);
-      setError(actionError instanceof Error ? actionError.message : "Message could not be updated.");
+      const detail = actionError instanceof Error ? actionError.message : "Messages could not be updated.";
+      setError(updatedCount
+        ? `${updatedCount} message${updatedCount === 1 ? "" : "s"} updated; the remaining messages could not be updated. ${detail}`
+        : detail);
     } finally {
       setBusyAction(false);
     }
@@ -896,7 +914,7 @@ export default function Dashboard() {
     }
 
     setDeletingMessages(true);
-    setMessageActionMenu(null);
+    setMessageSelectionMenuOpen(false);
     setError("");
     const deletedIds = new Set<string>();
     try {
@@ -938,7 +956,6 @@ export default function Dashboard() {
   function beginReply(item: ChatMessage) {
     setReplyTo({ message: item, messageId: getMessageDocumentId(item) });
     setMessageSource("manual");
-    setMessageActionMenu(null);
     window.setTimeout(() => composerInputRef.current?.focus(), 0);
   }
 
@@ -1006,7 +1023,7 @@ export default function Dashboard() {
       setError("Only text messages can be forwarded. Media forwarding is not supported.");
       return;
     }
-    setMessageActionMenu(null);
+    setMessageSelectionMenuOpen(false);
     setForwardSearch("");
     setForwardMessageIds(messageIds);
   }
@@ -1049,9 +1066,40 @@ export default function Dashboard() {
     }
   }
 
+  async function copySelectedMessages() {
+    const text = selectedMessages
+      .map((item) => item.text?.trim())
+      .filter((value): value is string => Boolean(value))
+      .join("\n");
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setSelectedMessageIds(new Set());
+      setMessageSelectionMenuOpen(false);
+      setError("");
+    } catch (copyError) {
+      console.error("Selected message copy failed:", copyError);
+      setError("Selected message text could not be copied.");
+    }
+  }
+
+  function openContactRequest() {
+    if (!selectedChat) return;
+    setContactRequest({
+      name: displayName(selectedChat),
+      phone: selectedChat.customerPhone,
+    });
+    setSelectedMessageIds(new Set());
+    setMessageSelectionMenuOpen(false);
+    setSearch("");
+    setView("contacts");
+    setMobileListOpen(true);
+  }
+
   async function selectChat(chat: Chat) {
     setSelectedChatIds(new Set());
     setSelectedMessageIds(new Set());
+    setMessageSelectionMenuOpen(false);
     setReplyTo(null);
     setShowPinnedMessages(false);
     setDeleteError("");
@@ -1544,6 +1592,8 @@ export default function Dashboard() {
                 search={search}
                 chats={chats}
                 onOpenChat={(chat) => void selectChat(chat)}
+                contactRequest={contactRequest}
+                onContactRequestHandled={() => setContactRequest(null)}
               />
             ) : view === "settings" ? (
               <div className="settings-list">
@@ -1730,7 +1780,91 @@ export default function Dashboard() {
             </section>
           ) : selectedChat && view === "chats" ? (
             <>
-              <header className="conversation-header">
+              {selectedMessageIds.size > 0 ? (
+                <header className="conversation-header message-selection-toolbar" aria-live="polite">
+                  <button
+                    type="button"
+                    className="icon-button selection-cancel"
+                    onClick={cancelMessageSelection}
+                    aria-label="Cancel message selection"
+                    title="Cancel selection"
+                  ><X size={20} /></button>
+                  <strong>{selectedMessageIds.size} selected</strong>
+                  <button
+                    type="button"
+                    className="selection-action"
+                    onClick={() => void deleteMessagesFromInbox([...selectedMessageIds], true)}
+                    disabled={deletingMessages || forwardingMessages}
+                    aria-label="Delete selected messages"
+                    title="Delete"
+                  >{deletingMessages ? <Loader2 className="spin" size={20} /> : <Trash2 size={20} />}</button>
+                  <button
+                    type="button"
+                    className="selection-action"
+                    onClick={() => void copySelectedMessages()}
+                    disabled={!selectedMessagesCanCopy}
+                    aria-label="Copy selected message text"
+                    title="Copy"
+                  ><Copy size={20} /></button>
+                  <button
+                    type="button"
+                    className="selection-action"
+                    onClick={() => beginForward([...selectedMessageIds])}
+                    disabled={!selectedMessagesCanForward || forwardingMessages || deletingMessages}
+                    aria-label="Forward selected messages"
+                    title="Forward"
+                  ><Forward size={20} /></button>
+                  <div className="selection-overflow" ref={selectionMenuRef}>
+                    <button
+                      type="button"
+                      className="selection-action"
+                      onClick={() => setMessageSelectionMenuOpen((current) => !current)}
+                      aria-label="More message actions"
+                      aria-haspopup="menu"
+                      aria-expanded={messageSelectionMenuOpen}
+                      title="More options"
+                    ><MoreVertical size={21} /></button>
+                    {messageSelectionMenuOpen && (
+                      <div className="selection-overflow-menu" role="menu" aria-label="More message actions">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled
+                          title="Message editing is not supported by the WhatsApp Cloud API."
+                        ><Pencil size={17} />Edit message</button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={busyAction || selectedMessages.length !== selectedMessageIds.size}
+                          onClick={() => void setSelectedMessagesPinned(selectedMessages)}
+                        >
+                          <Pin size={17} />
+                          {selectedMessages.length === 1
+                            ? selectedMessages[0].pinned ? "Unpin message" : "Pin message"
+                            : selectedMessages.some((item) => !item.pinned) ? "Pin selected messages" : "Unpin selected messages"}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={forwardContactsLoading}
+                          onClick={openContactRequest}
+                        >
+                          <ContactRound size={17} />
+                          {forwardContactsLoading
+                            ? "Loading contact…"
+                            : forwardContactsByPhone.has(phoneDigits(selectedChat.customerPhone))
+                              ? "Edit contact"
+                              : "Add to contact"}
+                        </button>
+                        <p className="selection-menu-note">
+                          Message editing is not supported by the WhatsApp Cloud API.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </header>
+              ) : (
+                <header className="conversation-header">
                 <button type="button" className="icon-button back-button" onClick={() => setMobileListOpen(true)} aria-label="Back to conversations">
                   <ArrowLeft size={20} />
                 </button>
@@ -1781,34 +1915,9 @@ export default function Dashboard() {
                   >{selectedChat.archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}</button>
                 </div>
               </header>
+              )}
 
               <section className="message-history" aria-label={`Messages with ${displayName(selectedChat)}`}>
-                {selectedMessageIds.size > 0 && (
-                  <motion.div
-                    className="message-selection-toolbar"
-                    initial={{ opacity: 0, y: -8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.16 }}
-                  >
-                    <strong>{selectedMessageIds.size} selected</strong>
-                    <button
-                      type="button"
-                      onClick={() => beginForward([...selectedMessageIds])}
-                      disabled={deletingMessages || forwardingMessages || [...selectedMessageIds].some((id) => {
-                        const selected = findMessageById(id);
-                        return !selected || selected.type !== "text" || !selected.text?.trim();
-                      })}
-                    ><Forward size={16} />Forward</button>
-                    <button
-                      type="button"
-                      onClick={() => void deleteMessagesFromInbox([...selectedMessageIds], true)}
-                      disabled={deletingMessages || forwardingMessages}
-                    >{deletingMessages ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}Delete</button>
-                    <button type="button" className="selection-cancel" onClick={cancelMessageSelection} aria-label="Cancel message selection">
-                      <X size={18} />
-                    </button>
-                  </motion.div>
-                )}
                 {(selectedChat.greetingStatus === "failed" || selectedChat.greetingStatus === "outside_service_window") && (
                   <p className="greeting-warning" role="status">
                     Greeting was not sent: {selectedChat.greetingLastError || "check the greeting settings and WhatsApp connection."}
@@ -1876,7 +1985,7 @@ export default function Dashboard() {
                         onWheel={(event) => handleMessageWheel(item, event)}
                         onContextMenu={(event) => {
                           event.preventDefault();
-                          openMessageActionMenu(item, event.clientX, event.clientY);
+                          selectMessage(item);
                         }}
                         onClick={(event) => {
                           if (event.target instanceof Element && event.target.closest("button, a, video, audio")) return;
@@ -1902,8 +2011,7 @@ export default function Dashboard() {
                             onKeyDown={(event) => {
                               if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
                                 event.preventDefault();
-                                const bounds = event.currentTarget.getBoundingClientRect();
-                                openMessageActionMenu(item, bounds.left + bounds.width / 2, bounds.bottom);
+                                selectMessage(item);
                               }
                             }}
                           >
@@ -2051,84 +2159,6 @@ export default function Dashboard() {
           )}
         </main>
       </div>
-      {messageActionMenu && (
-        <motion.div
-          className="message-action-backdrop"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          onClick={() => setMessageActionMenu(null)}
-        >
-          <motion.div
-            className="message-action-menu"
-            role="menu"
-            aria-label="Message actions"
-            style={{ left: messageActionMenu.x, top: messageActionMenu.y }}
-            initial={{ opacity: 0, scale: 0.96, y: 5 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            transition={{ duration: 0.14 }}
-            onClick={(event) => event.stopPropagation()}
-          >
-            {(() => {
-              const item = messageActionMenu.message;
-              const id = getMessageDocumentId(item);
-              const isSelected = selectedMessageIds.has(id);
-              const canForward = item.type === "text" && Boolean(item.text?.trim());
-              return (
-                <>
-                  <button type="button" role="menuitem" onClick={() => {
-                    toggleMessageSelection(item);
-                    setMessageActionMenu(null);
-                  }}>
-                    {isSelected ? <X size={17} /> : <Check size={17} />}
-                    {isSelected ? "Deselect message" : "Select message"}
-                  </button>
-                  <button type="button" role="menuitem" onClick={() => beginReply(item)}>
-                    <Reply size={17} />Reply
-                  </button>
-                  <button type="button" role="menuitem" disabled={!item.text?.trim()} onClick={() => {
-                    setMessageActionMenu(null);
-                    void navigator.clipboard.writeText(item.text).catch((copyError: unknown) => {
-                      console.error("Message copy failed:", copyError);
-                      setError("Message text could not be copied.");
-                    });
-                  }}>
-                    <Copy size={17} />Copy text
-                  </button>
-                  <button type="button" role="menuitem" disabled={!canForward || forwardingMessages} onClick={() => beginForward([id])}>
-                    <Forward size={17} />Forward
-                  </button>
-                  <button type="button" role="menuitem" disabled={busyAction} onClick={() => void setMessagePinned(item)}>
-                    <Pin size={17} />{item.pinned ? "Unpin message" : "Pin message"}
-                  </button>
-                  {item.direction === "outgoing" && (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      disabled
-                      title="Message editing is not supported by the WhatsApp Cloud API."
-                    ><Pencil size={17} />Edit message</button>
-                  )}
-                  <button type="button" role="menuitem" disabled={deletingMessages} onClick={() => void deleteMessagesFromInbox([id], true)}>
-                    <Trash2 size={17} />Delete for me
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled
-                    title="Deleting a sent message for everyone is not supported by the WhatsApp Cloud API."
-                  >
-                    <Trash2 size={17} />Delete for everyone
-                  </button>
-                  <p className="message-action-note">
-                    Edit and delete-for-everyone are unavailable because the documented WhatsApp Cloud API does not expose those operations.
-                  </p>
-                </>
-              );
-            })()}
-          </motion.div>
-        </motion.div>
-      )}
       {forwardMessageIds && (
         <div className="contact-modal-backdrop" onClick={() => !forwardingMessages && setForwardMessageIds(null)}>
           <section
