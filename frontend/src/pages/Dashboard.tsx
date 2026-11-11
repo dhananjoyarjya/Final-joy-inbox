@@ -243,8 +243,6 @@ export default function Dashboard() {
   const messageSourceRef = useRef(messageSource);
   const attachmentDraftRef = useRef(attachment);
   const replyDraftRef = useRef(replyTo);
-  messageDraftRef.current = message;
-  messageSourceRef.current = messageSource;
   attachmentDraftRef.current = attachment;
   replyDraftRef.current = replyTo;
   const uploadController = useRef<AbortController | null>(null);
@@ -982,6 +980,7 @@ export default function Dashboard() {
 
   function beginReply(item: ChatMessage) {
     setReplyTo({ message: item, messageId: getMessageDocumentId(item) });
+    messageSourceRef.current = "manual";
     setMessageSource("manual");
     window.setTimeout(() => composerInputRef.current?.focus(), 0);
   }
@@ -1299,6 +1298,8 @@ export default function Dashboard() {
   }
 
   function handleComposerChange(value: string) {
+    messageDraftRef.current = value;
+    messageSourceRef.current = "manual";
     setMessage(value);
     setMessageSource("manual");
     setError("");
@@ -1306,6 +1307,8 @@ export default function Dashboard() {
   }
 
   function insertQuickReply(value: string) {
+    messageDraftRef.current = value;
+    messageSourceRef.current = "quick_reply";
     setMessage(value);
     setMessageSource("quick_reply");
     setSlashQuery(null);
@@ -1318,7 +1321,8 @@ export default function Dashboard() {
     if (!selectedChat || (!message.trim() && !attachment) || sending || sendInProgress.current) return;
     playSendSound();
     const chat = selectedChat;
-    const text = message.trim();
+    const draftText = message;
+    const text = draftText.trim();
     const currentAttachment = attachment;
     const currentSource = messageSource;
     const currentReplyTo = replyTo;
@@ -1401,6 +1405,16 @@ export default function Dashboard() {
           clientMessageId
         );
       }
+      if (
+        messageDraftRef.current === draftText &&
+        messageSourceRef.current === currentSource
+      ) {
+        messageDraftRef.current = "";
+        messageSourceRef.current = "manual";
+        setMessage("");
+        setMessageSource("manual");
+        setSlashQuery(null);
+      }
       console.info(JSON.stringify({
         metric: "frontend_send_elapsed_ms",
         durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
@@ -1416,11 +1430,6 @@ export default function Dashboard() {
             }
           : item)
       );
-      if (messageDraftRef.current === text && messageSourceRef.current === currentSource) {
-        setMessage("");
-        setMessageSource("manual");
-        setSlashQuery(null);
-      }
       if (currentReplyTo?.messageId === replyDraftRef.current?.messageId) {
         setReplyTo(null);
       }

@@ -73,7 +73,13 @@ export async function sendWhatsAppMessage(
     }
   );
 
-  const result = await response.json().catch(() => ({}));
+  const result: {
+    success?: boolean;
+    messageId?: string;
+    pending?: boolean;
+    error?: string;
+    retryable?: boolean;
+  } = await response.json().catch(() => ({}));
 
   if (!response.ok) {
     throw new WhatsAppSendError(
@@ -81,8 +87,18 @@ export async function sendWhatsAppMessage(
       result.retryable !== false
     );
   }
+  if (
+    result.success !== true ||
+    (typeof result.messageId !== "string" && result.pending !== true)
+  ) {
+    throw new Error("The server did not confirm the message send.");
+  }
 
-  return result as { success: boolean; messageId?: string; pending?: boolean };
+  return {
+    success: true,
+    messageId: result.messageId,
+    pending: result.pending,
+  };
 }
 
   export async function updateWhatsAppMessageState(
