@@ -688,6 +688,7 @@ select:focus-visible {
 }
 
 .message-history {
+  position: relative;
   display: flex;
   min-height: 0;
   flex: 1;
@@ -699,6 +700,30 @@ select:focus-visible {
   overscroll-behavior: contain;
   background-image: radial-gradient(color-mix(in srgb, var(--secondary-text) 8%, transparent) 0.7px, transparent 0.7px);
   background-size: 18px 18px;
+}
+
+.new-messages-button {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  z-index: 1;
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--primary-green) 44%, var(--border-color));
+  border-radius: 18px;
+  background: var(--surface-primary);
+  color: var(--primary-green-dark);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 2px 8px #0000001a;
+  transform: translateX(-50%);
+}
+
+.new-messages-button:hover {
+  background: color-mix(in srgb, var(--primary-green) 11%, var(--surface-primary));
 }
 
 .load-older-button {

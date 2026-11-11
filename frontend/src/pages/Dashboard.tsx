@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -206,6 +207,7 @@ export default function Dashboard() {
   const [deletingMessages, setDeletingMessages] = useState(false);
   const [loadingChats, setLoadingChats] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [newMessageCount, setNewMessageCount] = useState(0);
   const [sending, setSending] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [busyAction, setBusyAction] = useState(false);
@@ -257,6 +259,23 @@ export default function Dashboard() {
   const messageSwipeGesture = useRef<MessageSwipeGesture | null>(null);
   const trackpadSwipe = useRef<TrackpadSwipe | null>(null);
   const messageElements = useRef(new Map<string, HTMLDivElement>());
+  const messageHistoryRef = useRef<HTMLElement>(null);
+  const nearBottomRef = useRef(true);
+  const renderedMessagesRef = useRef<{
+    chatId: string | null;
+    ids: Set<string>;
+    latestId: string | null;
+  }>({ chatId: null, ids: new Set(), latestId: null });
+  const initialMessageScrollChatId = useRef<string | null>(null);
+  const pendingOlderPosition = useRef<{
+    chatId: string;
+    anchorId: string | null;
+    anchorTop: number;
+    scrollTop: number;
+    scrollHeight: number;
+    messageIds: Set<string>;
+  } | null>(null);
+  const pendingOutgoingScrollId = useRef<string | null>(null);
   const selectionMenuRef = useRef<HTMLDivElement>(null);
   const pendingQuotedMessageId = useRef<string | null>(null);
   const pendingSendAttempts = useRef(new Map<string, string>());
@@ -278,9 +297,27 @@ export default function Dashboard() {
       return aTime - bTime || (a.id || a.messageId).localeCompare(b.id || b.messageId);
     });
   }, [olderMessages, optimisticMessages, recentMessages, selectedChat?.id]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
 
   function registerSlashKeyHandler(handler: ((key: string) => boolean) | null) {
     slashKeyHandler.current = handler;
+  }
+
+  function scrollMessageHistoryToBottom(behavior: ScrollBehavior = "auto") {
+    const history = messageHistoryRef.current;
+    if (!history) return;
+    history.scrollTo({ top: history.scrollHeight, behavior });
+    nearBottomRef.current = true;
+    setNewMessageCount(0);
+  }
+
+  function handleMessageHistoryScroll() {
+    const history = messageHistoryRef.current;
+    if (!history) return;
+    nearBottomRef.current =
+      history.scrollHeight - history.clientHeight - history.scrollTop <= 80;
+    if (nearBottomRef.current) setNewMessageCount(0);
   }
 
   useEffect(() => () => {
@@ -476,6 +513,7 @@ export default function Dashboard() {
     setOlderMessages([]);
     setMessageCursor(null);
     setHasOlderMessages(false);
+    pendingOlderPosition.current = null;
     const unsubscribe = listenToMessages(
       selectedChat.id,
       (items, cursor, hasOlder) => {
@@ -504,6 +542,122 @@ export default function Dashboard() {
       unsubscribePinned();
     };
   }, [selectedChat?.id]);
+
+  useLayoutEffect(() => {
+    const chatId = selectedChat?.id;
+    const history = messageHistoryRef.current;
+    if (!chatId || !history) return;
+
+    const previous = renderedMessagesRef.current;
+    if (previous.chatId !== chatId) {
+      renderedMessagesRef.current = { chatId, ids: new Set(), latestId: null };
+      initialMessageScrollChatId.current = chatId;
+      nearBottomRef.current = true;
+      setNewMessageCount(0);
+      return;
+    }
+    if (loadingMessages) return;
+
+    const ids = messages.map(getMessageTrackingId);
+    const currentIds = new Set(ids);
+    const added = messages.filter((item) => !previous.ids.has(getMessageTrackingId(item)));
+
+    const olderPosition = pendingOlderPosition.current;
+    if (
+      olderPosition?.chatId === chatId &&
+      added.some((item) => olderPosition.messageIds.has(getMessageTrackingId(item)))
+    ) {
+      const anchor = olderPosition.anchorId
+        ? messageElements.current.get(olderPosition.anchorId)
+        : null;
+      if (anchor) {
+        const historyTop = history.getBoundingClientRect().top;
+        const anchorTop = anchor.getBoundingClientRect().top - historyTop;
+        history.scrollTop += anchorTop - olderPosition.anchorTop;
+      } else {
+        history.scrollTop =
+          olderPosition.scrollTop + history.scrollHeight - olderPosition.scrollHeight;
+      }
+      pendingOlderPosition.current = null;
+    }
+
+    if (initialMessageScrollChatId.current === chatId) {
+      initialMessageScrollChatId.current = null;
+      if (pendingOutgoingScrollId.current && currentIds.has(pendingOutgoingScrollId.current)) {
+        pendingOutgoingScrollId.current = null;
+      }
+      renderedMessagesRef.current = {
+        chatId,
+        ids: currentIds,
+        latestId: ids.at(-1) || null,
+      };
+      if (ids.length) scrollMessageHistoryToBottom();
+      return;
+    }
+
+    if (pendingOutgoingScrollId.current && currentIds.has(pendingOutgoingScrollId.current)) {
+      pendingOutgoingScrollId.current = null;
+      renderedMessagesRef.current = {
+        chatId,
+        ids: currentIds,
+        latestId: ids.at(-1) || null,
+      };
+      scrollMessageHistoryToBottom("smooth");
+      return;
+    }
+
+    const previousLatestIndex = previous.latestId ? ids.indexOf(previous.latestId) : -1;
+    const addedAfterLatest = added.filter((item) => {
+      const index = ids.indexOf(getMessageTrackingId(item));
+      return index > previousLatestIndex;
+    });
+    const newOutgoing = addedAfterLatest.some((item) => item.direction === "outgoing");
+    const newIncomingCount = addedAfterLatest.filter(
+      (item) => item.direction === "incoming"
+    ).length;
+
+    renderedMessagesRef.current = {
+      chatId,
+      ids: currentIds,
+      latestId: ids.at(-1) || null,
+    };
+
+    if (newOutgoing) {
+      scrollMessageHistoryToBottom("smooth");
+    } else if (newIncomingCount > 0) {
+      if (nearBottomRef.current) {
+        scrollMessageHistoryToBottom();
+      } else {
+        setNewMessageCount((count) => count + newIncomingCount);
+      }
+    }
+  }, [loadingMessages, messages, selectedChat?.id]);
+
+  useEffect(() => {
+    const history = messageHistoryRef.current;
+    if (!history || typeof ResizeObserver === "undefined") return;
+
+    const observedHeights = new WeakMap<Element, number>();
+    const observer = new ResizeObserver((entries) => {
+      let resized = false;
+      for (const entry of entries) {
+        const height = entry.contentRect.height;
+        if (observedHeights.get(entry.target) !== height) resized = true;
+        observedHeights.set(entry.target, height);
+      }
+      if (!resized || !nearBottomRef.current) return;
+      if (history.scrollHeight - history.clientHeight - history.scrollTop > 1) {
+        history.scrollTop = history.scrollHeight;
+      }
+    });
+
+    for (const element of messageElements.current.values()) {
+      observedHeights.set(element, element.getBoundingClientRect().height);
+      observer.observe(element);
+    }
+
+    return () => observer.disconnect();
+  }, [messages, selectedChat?.id]);
 
   useEffect(() => {
     const confirmedClientIds = new Set(
@@ -661,6 +815,31 @@ export default function Dashboard() {
     setError("");
     try {
       const page = await loadOlderMessages(selectedChat.id, messageCursor);
+      if (selectedChatId.current !== selectedChat.id) return;
+      if (page.messages.length) {
+        const history = messageHistoryRef.current;
+        const historyTop = history?.getBoundingClientRect().top || 0;
+        const anchor = history
+          ? messagesRef.current.find((item) => {
+              const element = messageElements.current.get(getMessageDocumentId(item));
+              return element && element.getBoundingClientRect().bottom > historyTop;
+            })
+          : undefined;
+        const anchorElement = anchor
+          ? messageElements.current.get(getMessageDocumentId(anchor))
+          : null;
+        const anchorTop = anchorElement && history
+          ? anchorElement.getBoundingClientRect().top - historyTop
+          : 0;
+        pendingOlderPosition.current = {
+          chatId: selectedChat.id,
+          anchorId: anchor ? getMessageDocumentId(anchor) : null,
+          anchorTop,
+          scrollTop: history?.scrollTop || 0,
+          scrollHeight: history?.scrollHeight || 0,
+          messageIds: new Set(page.messages.map(getMessageTrackingId)),
+        };
+      }
       setOlderMessages((current) => [...page.messages, ...current]);
       setMessageCursor(page.cursor);
       setHasOlderMessages(page.hasOlder);
@@ -691,6 +870,10 @@ export default function Dashboard() {
 
   function getMessageDocumentId(item: ChatMessage) {
     return item.id || item.messageId;
+  }
+
+  function getMessageTrackingId(item: ChatMessage) {
+    return item.clientMessageId || getMessageDocumentId(item);
   }
 
   function findMessageById(messageId: string) {
@@ -1123,6 +1306,7 @@ export default function Dashboard() {
   }
 
   async function selectChat(chat: Chat) {
+    const changingChat = selectedChatId.current !== chat.id;
     setSelectedChatIds(new Set());
     setSelectedMessageIds(new Set());
     setMessageSelectionMenuOpen(false);
@@ -1134,6 +1318,14 @@ export default function Dashboard() {
     setAttachment(null);
     setUploadProgress(0);
     setSelectedChat(chat);
+    if (changingChat) {
+      setRecentMessages([]);
+      setOlderMessages([]);
+      setPinnedMessages([]);
+      setLoadingMessages(true);
+      setNewMessageCount(0);
+      pendingOutgoingScrollId.current = null;
+    }
     setMobileListOpen(false);
     setView("chats");
     setError("");
@@ -1370,7 +1562,9 @@ export default function Dashboard() {
       ...current.filter((item) => item.clientMessageId !== clientMessageId),
       optimisticMessage
     ]);
+    pendingOutgoingScrollId.current = clientMessageId;
     setShowPinnedMessages(false);
+    setMessageSearch("");
     const startedAt = performance.now();
     window.requestAnimationFrame(() => {
       console.info(JSON.stringify({
@@ -2047,7 +2241,12 @@ export default function Dashboard() {
               </header>
               )}
 
-              <section className="message-history" aria-label={`Messages with ${displayName(selectedChat)}`}>
+              <section
+                ref={messageHistoryRef}
+                className="message-history"
+                aria-label={`Messages with ${displayName(selectedChat)}`}
+                onScroll={handleMessageHistoryScroll}
+              >
                 {(selectedChat.greetingStatus === "failed" || selectedChat.greetingStatus === "outside_service_window") && (
                   <p className="greeting-warning" role="status">
                     Greeting was not sent: {selectedChat.greetingLastError || "check the greeting settings and WhatsApp connection."}
@@ -2183,6 +2382,16 @@ export default function Dashboard() {
                       </motion.div>
                     );
                   })
+                )}
+                {newMessageCount > 0 && (
+                  <button
+                    type="button"
+                    className="new-messages-button"
+                    onClick={() => scrollMessageHistoryToBottom("smooth")}
+                    aria-label={`Show ${newMessageCount} new message${newMessageCount === 1 ? "" : "s"}`}
+                  >
+                    New messages{newMessageCount > 1 ? ` (${newMessageCount})` : ""}
+                  </button>
                 )}
               </section>
 
