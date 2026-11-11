@@ -7,6 +7,7 @@ const {
 
 function createDb() {
   const records = new Map();
+  let transactionQueue = Promise.resolve();
   return {
     collection: (collectionName) => {
       assert.equal(collectionName, "chats");
@@ -29,17 +30,21 @@ function createDb() {
         })
       };
     },
-    runTransaction: async (callback) => callback({
-      get: async (ref) => {
-        const data = records.get(ref.key);
-        return { exists: Boolean(data), data: () => data };
-      },
-      create: (ref, data) => records.set(ref.key, data),
-      set: (ref, data, options) => {
-        const previous = records.get(ref.key) || {};
-        records.set(ref.key, options?.merge ? { ...previous, ...data } : data);
-      }
-    }),
+    runTransaction: async (callback) => {
+      const transaction = transactionQueue.then(() => callback({
+        get: async (ref) => {
+          const data = records.get(ref.key);
+          return { exists: Boolean(data), data: () => data };
+        },
+        create: (ref, data) => records.set(ref.key, data),
+        set: (ref, data, options) => {
+          const previous = records.get(ref.key) || {};
+          records.set(ref.key, options?.merge ? { ...previous, ...data } : data);
+        }
+      }));
+      transactionQueue = transaction.catch(() => {});
+      return transaction;
+    },
     records
   };
 }
@@ -56,6 +61,17 @@ test("send request claims prevent duplicate sends and return completed receipts"
   const completed = await claimSendRequest(db, "15551230000", "request-1", "payload-hash");
   assert.equal(completed.state, "completed");
   assert.equal(completed.messageId, "wamid.1");
+});
+
+test("concurrent send requests with one client ID have only one sender", async () => {
+  const db = createDb();
+  const claims = await Promise.all([
+    claimSendRequest(db, "15551230000", "request-1", "payload-hash"),
+    claimSendRequest(db, "15551230000", "request-1", "payload-hash")
+  ]);
+
+  assert.equal(claims.filter((claim) => claim.state === "claimed").length, 1);
+  assert.equal(claims.filter((claim) => claim.state === "pending").length, 1);
 });
 
 test("send request IDs cannot be reused for a different payload", async () => {

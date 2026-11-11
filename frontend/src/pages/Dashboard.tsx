@@ -71,6 +71,7 @@ import {
   getGreetingSettings,
   saveGreetingSettings,
 } from "../services/whatsapp";
+import { mergeChatMessages } from "../services/messageReconciliation";
 import QuickReplies from "../components/QuickReplies";
 import type { Chat, ChatMessage, Contact, ReplyContext } from "../types";
 import type { DocumentData, QueryDocumentSnapshot } from "firebase/firestore";
@@ -261,6 +262,7 @@ export default function Dashboard() {
   const selectionMenuRef = useRef<HTMLDivElement>(null);
   const pendingQuotedMessageId = useRef<string | null>(null);
   const pendingSendAttempts = useRef(new Map<string, string>());
+  const sendInProgress = useRef(false);
   const attachmentRequestIds = useRef(new WeakMap<File, string>());
   const selectedChatId = useRef<string | null>(selectedChat?.id || null);
   const suppressMessageClick = useRef<string | null>(null);
@@ -270,15 +272,9 @@ export default function Dashboard() {
 
   const messages = useMemo(() => {
     if (!selectedChat) return [];
-    const allMessages = new Map<string, ChatMessage>();
-    for (const item of [...optimisticMessages, ...olderMessages, ...recentMessages]) {
-      if (item.chatId && item.chatId !== selectedChat.id) continue;
-      const key = item.clientMessageId
-        ? `client:${item.clientMessageId}`
-        : `document:${item.id || item.messageId}`;
-      allMessages.set(key, item);
-    }
-    return [...allMessages.values()].sort((a, b) => {
+    const allMessages = mergeChatMessages(optimisticMessages, olderMessages, recentMessages)
+      .filter((item) => !item.chatId || item.chatId === selectedChat.id);
+    return allMessages.sort((a, b) => {
       const aTime = asDate(a.timestamp)?.getTime() || 0;
       const bTime = asDate(b.timestamp)?.getTime() || 0;
       return aTime - bTime || (a.id || a.messageId).localeCompare(b.id || b.messageId);
@@ -1319,7 +1315,7 @@ export default function Dashboard() {
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedChat || (!message.trim() && !attachment) || sending) return;
+    if (!selectedChat || (!message.trim() && !attachment) || sending || sendInProgress.current) return;
     playSendSound();
     const chat = selectedChat;
     const text = message.trim();
@@ -1365,6 +1361,7 @@ export default function Dashboard() {
         replyToMessageType: replyContext.replyToMessageType
       } : {})
     };
+    sendInProgress.current = true;
     setOptimisticMessages((current) => [
       ...current.filter((item) => item.clientMessageId !== clientMessageId),
       optimisticMessage
@@ -1457,6 +1454,7 @@ export default function Dashboard() {
             : "Message could not be sent.");
       }
     } finally {
+      sendInProgress.current = false;
       setSending(false);
       setUploadProgress(0);
       uploadController.current = null;
